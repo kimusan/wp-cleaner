@@ -7,55 +7,50 @@
 #
 FOLDER=.
 if [ "$1" == "--delete" ]; then
-	DELETE=" | tr \"\\n\" \"\\000\" | xargs -0 rm"
+	DELETE=" | tr \"\\n\" \"\\000\" | xargs -0 rm -f"
 else
 	DELETE=""
 fi
 
 echo " :: FilesMan"
-grep -rnw ${FOLDER} -e "FilesMan" | cut -d":" -f1 ${DELETE}
+sh -c "grep -rnwl ${FOLDER} -e \"FilesMan\" ${DELETE}"
 echo " :: \"base64_decode\";return > ";
-grep -rnw ${FOLDER} -e "\"base64_decode\";return" | cut -d":" -f1 ${DELETE}
+sh -c "grep -rnwl ${FOLDER} -e \"\\\"base64_decode\\\";return\" ${DELETE}"
 echo " :: ; \$GLOBALS > ";
-grep -rnw ${FOLDER} -e "; \$GLOBALS" | cut -d":" -f1 ${DELETE}
+sh -c "grep -rnwl ${FOLDER} -e \"; \\\$GLOBALSi\" ${DELETE}"
 echo " :: <?php \${\" > ";
-grep -rnw ${FOLDER} -e "<?php \${" | cut -d":" -f1 ${DELETE}
-
-#ssh -i ${AWS_KEYFILE} ubuntu@${DOMAIN} "sudo grep -rnw ${FOLDER} -e 'return base64_decode(' | cut -d\":\" -f1; exit"
-
+sh -c "grep -rnwl ${FOLDER} -e \"<?php \\\${\" ${DELETE}"
 echo " :: <?php \$array = array( > ";
-grep -rnw ${FOLDER} -e "<?php \$array = array(" | cut -d":" -f1 ${DELETE}
+sh -c "grep -lrnw ${FOLDER} -e \"<?php \\\$array = array(\" ${DELETE}"
 echo " :: mail(stripslashes( > ";
-grep -rnw ${FOLDER} -e "mail(stripslashes(" | cut -d":" -f1 ${DELETE}
+sh -c "grep -lrnw ${FOLDER} -e \"mail(stripslashes(\" ${DELETE}"
 echo " :: <?php @array_diff_ukey( > ";
-grep -rnw ${FOLDER} -e "<?php @array_diff_ukey(" | cut -d":" -f1 ${DELETE}
+sh -c "grep -lrnw ${FOLDER} -e \"<?php @array_diff_ukey(\" ${DELETE}"
 echo " :: \$_REQUEST[chr( > ";
-grep -rnw ${FOLDER} -e "\$_REQUEST\[chr(" | cut -d":" -f1 ${DELETE}
+sh -c "grep -lrnw ${FOLDER} -e \"\\\$_REQUEST\[chr(\" ${DELETE}"
 echo " :: <?php \$GLOBALS[ > ";
-grep -rnw ${FOLDER} -e "<?php \$GLOBALS\[" | cut -d":" -f1 ${DELETE}
-
-# New backdoors
+sh -c "grep -lrnw ${FOLDER} -e \"<?php \\\$GLOBALS\[\" ${DELETE}"
 echo " :: eval(\$\{ > ";
-grep -rnw ${FOLDER} -e "eval(\${" | cut -d":" -f1 ${DELETE}
+sh -c "grep -lrnw ${FOLDER} -e \"eval(\\\${\" ${DELETE}"
 echo " :: isset(\${ > ";
-grep -rnw ${FOLDER} -e "isset(\${" | cut -d":" -f1 ${DELETE}
+sh -c "grep -lrnw ${FOLDER} -e \"isset(\\\${\" ${DELETE}"
 
 echo " :: PhpReverseProxy > ";
-grep -rnw ${FOLDER} -e "PhpReverseProxy" | cut -d":" -f1 ${DELETE}
+sh -c "grep -lrnw ${FOLDER} -e \"PhpReverseProxy\" ${DELETE}"
 echo " :: str_rot13 > ";
-grep -rnw ${FOLDER} -e "str_rot13(" | cut -d":" -f1 ${DELETE}
+sh -c "grep -lrnw ${FOLDER} -e \"str_rot13(\" ${DELETE}"
 echo " :: @set_time_limit(0); > ";
-grep -rnw ${FOLDER} -e "@set_time_limit(0);" | cut -d":" -f1 ${DELETE}
+sh -c "grep -lrnw ${FOLDER} -e \"@set_time_limit(0);\" ${DELETE}"
 echo " :: strripos(@sha1( > ";
-grep -rnw ${FOLDER} -e "strripos(@sha1(" | cut -d":" -f1 ${DELETE}
+sh -c "grep -lrnw ${FOLDER} -e \"strripos(@sha1(\" ${DELETE}"
 echo " :: @assert( >";
-grep -rnw ${FOLDER} -e "@assert(" | cut -d":" -f1 ${DELETE}
+sh -c "grep -lrnw ${FOLDER} -e \"@assert(\" ${DELETE}"
 echo " :: made-in-china.com >";
-grep -rnw ${FOLDER} -e "made-in-china.com" | cut -d":" -f1 ${DELETE}
+sh -c "grep -lrnw ${FOLDER} -e \"made-in-china.com\" ${DELETE}"
 
 echo " :: trim(curl_exec(\$ch)) >";
-grep -rnw ${FOLDER} -e "trim(curl_exec(\$ch))" | cut -d":" -f1 ${DELETE}
+sh -c "grep -lrnw ${FOLDER} -e \"trim(curl_exec(\\\$ch))\" ${DELETE}"
 
 
 echo " :: function.*for.*strlen.*isset > ";
-egrep -Rl \"function.*for.*strlen.*isset\" ${FOLDER} ${DELETE}
+sh -c "egrep -Rl \"function.*for.*strlen.*isset\" ${FOLDER} ${DELETE}"
