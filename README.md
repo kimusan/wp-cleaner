@@ -1,5 +1,6 @@
 # wp-cleaner 
-_Kim Schulz <kim@schulz.dk>_
+_By Kim Schulz <kim@schulz.dk>_
+
 Simple cleanup/scanner tool for wordpress installations that have been infected
 
 
@@ -17,6 +18,7 @@ installation. So make sure to make a backup before starting.
 
 ## changelist
 v0.2:
-	* cleanup and fix --delete to work on all platforms. 
+ * cleanup and fix --delete to work on all platforms. 
+
 v0.1:
-	* Initial version
+ * Initial version
