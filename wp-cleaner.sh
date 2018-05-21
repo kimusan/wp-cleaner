@@ -1,7 +1,7 @@
 #!/bin/bash
 # WORDPRESS CLEANER
 # By Kim Schulz <kim@schulz.dk>
-# Version 0.2
+# Version 0.3
 # github.com/kimusan/wp-cleaner
 FOLDER=.
 if [ "$1" == "--delete" ]; then
@@ -48,7 +48,9 @@ sh -c "grep -lrnw ${FOLDER} -e \"made-in-china.com\" ${DELETE}"
 
 echo " :: Checking for \"trim(curl_exec(\$ch))\":";
 sh -c "grep -lrnw ${FOLDER} -e \"trim(curl_exec(\\\$ch))\" ${DELETE}"
-
-
+echo " :: Checking for \"onfr64_qrpbqr\":";
+sh -c "grep -lrnw ${FOLDER} -e \"onfr64_qrpbqr\" ${DELETE}"
 echo " :: Checking for \"function.*for.*strlen.*isset\": ";
 sh -c "egrep -Rl \"function.*for.*strlen.*isset\" ${FOLDER} ${DELETE}"
+echo " :: Checking files for \"eval(function(_0x7a86x1\": ";
+sh -c "grep -lrnw ${FOLDER} -e \"eval(function(_0x7a86x1\" ${DELETE}"

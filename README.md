@@ -17,6 +17,8 @@ It is your own fault if this script causes any damage by deleting important file
 installation. So make sure to make a backup before starting. 
 
 ## changelist
+v0.3:
+ * added extra scanners for some of the new crypto mining malware for WP. 
 v0.2:
  * cleanup and fix --delete to work on all platforms. 
 
