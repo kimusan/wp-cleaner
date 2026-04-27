@@ -269,21 +269,13 @@ class ScannerTUI(App):
                         self.low_count += 1
                     
                     level_class = finding.threat_level
-                    # Add background color based on severity
-                    bg_colors = {
-                        'critical': '#3a1a1a',
-                        'high': '#3a2a1a',
-                        'medium': '#3a3a1a',
-                        'low': '#1a3a1a'
-                    }
-                    bg = bg_colors.get(level_class, '#1a1a1a')
                     
                     table.add_row(
-                        f"[{level_class} on {bg}]{finding.threat_level.upper()}[/]",
-                        f"[on {bg}]{Path(finding.file_path).name[:25]}[/]",
-                        f"[on {bg}]{finding.signature_name[:20]}[/]",
-                        f"[on {bg}]{finding.line_number}[/]",
-                        f"[on {bg}]{finding.category[:15]}[/]",
+                        f"[{level_class}]{finding.threat_level.upper()}[/]",
+                        Path(finding.file_path).name[:25],
+                        finding.signature_name[:20],
+                        str(finding.line_number),
+                        finding.category[:15],
                         key=f"{finding.file_path}:{finding.line_number}"
                     )
             except Exception:
