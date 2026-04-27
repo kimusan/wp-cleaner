@@ -239,6 +239,10 @@ class ScannerTUI(App):
                 self.call_from_thread(self._scan_done)
                 return
             
+            # Batch results to reduce call_from_thread overhead
+            batch = []
+            batch_size = 20
+            
             with ThreadPoolExecutor(max_workers=self.threads) as executor:
                 future_to_file = {executor.submit(self.scanner.scan_file, f): f for f in files}
                 for future in as_completed(future_to_file):
@@ -253,7 +257,16 @@ class ScannerTUI(App):
                     
                     result = future.result()
                     self.results.append(result)
-                    self.call_from_thread(self._process_result, result)
+                    batch.append(result)
+                    
+                    # Only call UI every batch_size files
+                    if len(batch) >= batch_size:
+                        self.call_from_thread(self._process_batch, list(batch))
+                        batch = []
+            
+            # Process remaining files
+            if batch:
+                self.call_from_thread(self._process_batch, list(batch))
             
             if not self._stop_event.is_set():
                 self.call_from_thread(self._scan_done)
@@ -265,29 +278,47 @@ class ScannerTUI(App):
     def _set_total_files(self, total: int) -> None:
         self.total_files = total
     
-    def _process_result(self, result) -> None:
-        self.files_scanned += 1
-        self.current_file_path = result.file_path
+    def _process_batch(self, batch) -> None:
+        """Process a batch of results and update UI."""
+        for result in batch:
+            self.files_scanned += 1
+            self.current_file_path = result.file_path
+            
+            # Collect findings data
+            new_findings = []
+            if result.findings:
+                for finding in result.findings:
+                    new_findings.append(finding)
+                    if finding.threat_level == 'critical':
+                        self.critical_count += 1
+                    elif finding.threat_level == 'high':
+                        self.high_count += 1
+                    elif finding.threat_level == 'medium':
+                        self.medium_count += 1
+                    else:
+                        self.low_count += 1
+            
+            # Add findings to table
+            if new_findings:
+                try:
+                    table = self.query_one("#findings-table", DataTable)
+                    rows = []
+                    for finding in new_findings:
+                        level_class = finding.threat_level
+                        self.findings.append(finding)
+                        rows.append((
+                            f"[{level_class}]{finding.threat_level.upper()}[/]",
+                            Path(finding.file_path).name[:25],
+                            finding.signature_name[:20],
+                            str(finding.line_number),
+                            finding.category[:15],
+                        ))
+                    if rows:
+                        table.add_rows(rows)
+                except Exception:
+                    pass
         
-        # Collect findings data
-        new_findings = []
-        if result.findings:
-            for finding in result.findings:
-                new_findings.append(finding)
-                if finding.threat_level == 'critical':
-                    self.critical_count += 1
-                elif finding.threat_level == 'high':
-                    self.high_count += 1
-                elif finding.threat_level == 'medium':
-                    self.medium_count += 1
-                else:
-                    self.low_count += 1
-        
-        # Only update UI every 20 files to avoid overwhelming the event loop
-        if self.files_scanned % 20 != 0 and self.files_scanned != self.total_files:
-            return
-        
-        # Batch update UI every 20 files
+        # Update progress and status after batch
         try:
             progress_bar = self.query_one("#main-progress", ProgressBar)
             progress = (self.files_scanned / self.total_files * 100) if self.total_files > 0 else 0
@@ -295,10 +326,8 @@ class ScannerTUI(App):
         except Exception:
             pass
         
-        # Update status text
         self.status_text = f"Scanning... {self.files_scanned}/{self.total_files}"
         
-        # Update stats display
         try:
             status_display = self.query_one("#stats-display", Static)
             status_display.update(f"""
@@ -308,26 +337,8 @@ class ScannerTUI(App):
             """)
         except Exception:
             pass
-        
-        # Batch add findings to table
-        if new_findings:
-            try:
-                table = self.query_one("#findings-table", DataTable)
-                rows = []
-                for finding in new_findings:
-                    level_class = finding.threat_level
-                    self.findings.append(finding)
-                    rows.append((
-                        f"[{level_class}]{finding.threat_level.upper()}[/]",
-                        Path(finding.file_path).name[:25],
-                        finding.signature_name[:20],
-                        str(finding.line_number),
-                        finding.category[:15],
-                    ))
-                if rows:
-                    table.add_rows(rows)
-            except Exception:
-                pass
+    
+
     
     def _scan_done(self):
         self.scan_complete = True
