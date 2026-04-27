@@ -9,6 +9,7 @@ from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import time
+import signal
 
 try:
     from textual.app import App, ComposeResult
@@ -49,6 +50,22 @@ class SummaryScreen(ModalScreen):
 
 Press ESC to close
 """, id="summary-box")
+    
+    def action_dismiss(self) -> None:
+        self.dismiss()
+
+
+class SummaryScreenMock(ModalScreen):
+    """Modal screen showing scan progress (when scan not complete)."""
+    
+    BINDINGS = [Binding("escape", "dismiss", "Close")]
+    
+    def __init__(self, text: str):
+        super().__init__()
+        self.text = text
+    
+    def compose(self) -> ComposeResult:
+        yield Static(self.text, id="summary-box")
     
     def action_dismiss(self) -> None:
         self.dismiss()
@@ -126,12 +143,14 @@ class ScannerTUI(App):
         Binding("q", "quit_app", "Quit", priority=True),
         Binding("s", "show_summary", "Summary"),
         Binding("c", "clear_findings", "Clear"),
+        Binding("p", "toggle_pause", "Pause"),
+        Binding("escape", "quit_app", "Quit", show=False),
     ]
     
     files_scanned = reactive(0)
     total_files = reactive(0)
-    current_file_path = reactive("Starting scan...")
-    status_text = reactive("Initializing")
+    current_file_path = reactive("Scanning...")
+    status_text = reactive("Scanning...")
     critical_count = reactive(0)
     high_count = reactive(0)
     medium_count = reactive(0)
@@ -147,6 +166,10 @@ class ScannerTUI(App):
         self.scan_complete = False
         self._stats = None
         self._scan_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._paused = False
+        self._pause_event = threading.Event()
+        self._pause_event.set()  # Not paused by default
     
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -197,11 +220,23 @@ class ScannerTUI(App):
             with ThreadPoolExecutor(max_workers=self.threads) as executor:
                 future_to_file = {executor.submit(self.scanner.scan_file, f): f for f in files}
                 for future in as_completed(future_to_file):
+                    # Check if stop requested
+                    if self._stop_event.is_set():
+                        break
+                    
+                    # Check if paused
+                    self._pause_event.wait()
+                    if self._stop_event.is_set():
+                        break
+                    
                     result = future.result()
                     self.results.append(result)
                     self.call_from_thread(self._process_result, result)
             
-            self.call_from_thread(self._scan_done)
+            if not self._stop_event.is_set():
+                self.call_from_thread(self._scan_done)
+            else:
+                self.call_from_thread(self._scan_cancelled)
         except Exception as e:
             self.call_from_thread(self._scan_error, str(e))
     
@@ -234,12 +269,21 @@ class ScannerTUI(App):
                         self.low_count += 1
                     
                     level_class = finding.threat_level
+                    # Add background color based on severity
+                    bg_colors = {
+                        'critical': '#3a1a1a',
+                        'high': '#3a2a1a',
+                        'medium': '#3a3a1a',
+                        'low': '#1a3a1a'
+                    }
+                    bg = bg_colors.get(level_class, '#1a1a1a')
+                    
                     table.add_row(
-                        f"[{level_class}]{finding.threat_level.upper()}[/{level_class}]",
-                        Path(finding.file_path).name[:25],
-                        finding.signature_name[:20],
-                        str(finding.line_number),
-                        finding.category[:15],
+                        f"[{level_class} on {bg}]{finding.threat_level.upper()}[/]",
+                        f"[on {bg}]{Path(finding.file_path).name[:25]}[/]",
+                        f"[on {bg}]{finding.signature_name[:20]}[/]",
+                        f"[on {bg}]{finding.line_number}[/]",
+                        f"[on {bg}]{finding.category[:15]}[/]",
                         key=f"{finding.file_path}:{finding.line_number}"
                     )
             except Exception:
@@ -253,6 +297,10 @@ class ScannerTUI(App):
         self.status_text = "✓ Scan complete"
         self._calculate_stats()
     
+    def _scan_cancelled(self):
+        self.scan_complete = True
+        self.status_text = "✗ Scan cancelled"
+    
     def _scan_error(self, error: str):
         self.scan_complete = True
         self.status_text = f"✗ Error: {error}"
@@ -264,13 +312,45 @@ class ScannerTUI(App):
             self._stats = calculate_stats(self.results, start_time, time.time())
     
     def action_quit_app(self) -> None:
+        """Quit immediately, stopping scan if in progress."""
+        self._stop_event.set()
+        self._pause_event.set()  # Unblock if paused
         self.exit()
     
+    def action_toggle_pause(self) -> None:
+        """Pause or resume the scan."""
+        if self.scan_complete:
+            return
+        
+        self._paused = not self._paused
+        if self._paused:
+            self._pause_event.clear()
+            self.status_text = "⏸ Paused - press 'p' to resume"
+        else:
+            self._pause_event.set()
+            self.status_text = f"Scanning... {self.files_scanned}/{self.total_files}"
+    
     def action_show_summary(self) -> None:
+        """Show summary or progress info."""
         if self._stats:
             self.push_screen(SummaryScreen(self._stats))
         else:
-            self.status_text = "Scan in progress - summary available when complete"
+            # Show progress during scan
+            progress_text = f"""
+╔══════════════════════════════════════════════════════════╗
+║                    SCAN IN PROGRESS                       ║
+╠══════════════════════════════════════════════════════════╣
+║  Files Scanned:     {self.files_scanned:>6} / {self.total_files:<6}                     ║
+║  Findings So Far:   {self.critical_count + self.high_count + self.medium_count + self.low_count:>6}                          ║
+║                                                           ║
+║  Critical: {self.critical_count:>3}  |  High: {self.high_count:>3}  |  Medium: {self.medium_count:>3}  |  Low: {self.low_count:>3}         ║
+║                                                           ║
+║  Press 'p' to pause, 'q' to quit                          ║
+╚══════════════════════════════════════════════════════════╝
+
+Press ESC to close
+"""
+            self.push_screen(SummaryScreenMock(progress_text))
     
     def action_clear_findings(self) -> None:
         try:
