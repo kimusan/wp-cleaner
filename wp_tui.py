@@ -269,37 +269,25 @@ class ScannerTUI(App):
         self.files_scanned += 1
         self.current_file_path = result.file_path
         
-        # Only update UI every 10 files to avoid overwhelming the event loop
-        if self.files_scanned % 10 != 0 and self.files_scanned != self.total_files:
-            if result.findings:
-                # Still add findings immediately but batch UI updates
-                try:
-                    table = self.query_one("#findings-table", DataTable)
-                    for finding in result.findings:
-                        self.findings.append(finding)
-                        if finding.threat_level == 'critical':
-                            self.critical_count += 1
-                        elif finding.threat_level == 'high':
-                            self.high_count += 1
-                        elif finding.threat_level == 'medium':
-                            self.medium_count += 1
-                        else:
-                            self.low_count += 1
-                        
-                        level_class = finding.threat_level
-                        table.add_row(
-                            f"[{level_class}]{finding.threat_level.upper()}[/]",
-                            Path(finding.file_path).name[:25],
-                            finding.signature_name[:20],
-                            str(finding.line_number),
-                            finding.category[:15],
-                            key=f"{finding.file_path}:{finding.line_number}"
-                        )
-                except Exception:
-                    pass
+        # Collect findings data
+        new_findings = []
+        if result.findings:
+            for finding in result.findings:
+                new_findings.append(finding)
+                if finding.threat_level == 'critical':
+                    self.critical_count += 1
+                elif finding.threat_level == 'high':
+                    self.high_count += 1
+                elif finding.threat_level == 'medium':
+                    self.medium_count += 1
+                else:
+                    self.low_count += 1
+        
+        # Only update UI every 20 files to avoid overwhelming the event loop
+        if self.files_scanned % 20 != 0 and self.files_scanned != self.total_files:
             return
         
-        # Batch update UI every 10 files
+        # Batch update UI every 20 files
         try:
             progress_bar = self.query_one("#main-progress", ProgressBar)
             progress = (self.files_scanned / self.total_files * 100) if self.total_files > 0 else 0
@@ -321,30 +309,23 @@ class ScannerTUI(App):
         except Exception:
             pass
         
-        # Add findings for this batch
-        if result.findings:
+        # Batch add findings to table
+        if new_findings:
             try:
                 table = self.query_one("#findings-table", DataTable)
-                for finding in result.findings:
-                    self.findings.append(finding)
-                    if finding.threat_level == 'critical':
-                        self.critical_count += 1
-                    elif finding.threat_level == 'high':
-                        self.high_count += 1
-                    elif finding.threat_level == 'medium':
-                        self.medium_count += 1
-                    else:
-                        self.low_count += 1
-                    
+                rows = []
+                for finding in new_findings:
                     level_class = finding.threat_level
-                    table.add_row(
+                    self.findings.append(finding)
+                    rows.append((
                         f"[{level_class}]{finding.threat_level.upper()}[/]",
                         Path(finding.file_path).name[:25],
                         finding.signature_name[:20],
                         str(finding.line_number),
                         finding.category[:15],
-                        key=f"{finding.file_path}:{finding.line_number}"
-                    )
+                    ))
+                if rows:
+                    table.add_rows(rows)
             except Exception:
                 pass
     
