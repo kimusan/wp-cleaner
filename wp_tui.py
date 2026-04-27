@@ -163,59 +163,8 @@ class ScannerTUI(App):
         """Called when paused state changes."""
         if paused:
             self.sub_title = "⏸ PAUSED"
-            self.status_text = "⏸ Paused"
         else:
             self.sub_title = "Real-time malware detection"
-            self.status_text = f"Scanning... {self.files_scanned}/{self.total_files}"
-    
-    def watch_status_text(self, text: str) -> None:
-        """Update status display when status_text changes."""
-        try:
-            status_display = self.query_one("#stats-display", Static)
-            status_display.update(f"""
-[stat-label]Files:[/stat-label] [stat-value]{self.files_scanned}[/stat-value] / [stat-value]{self.total_files}[/stat-value]
-[stat-label]Findings:[/stat-label] [critical]{self.critical_count}[/critical] [high]{self.high_count}[/high] [medium]{self.medium_count}[/medium] [low]{self.low_count}[/low]
-[stat-label]Status:[/stat-label] [cyan]{text}[/cyan]
-            """)
-        except Exception:
-            pass
-    
-    def watch_files_scanned(self, count: int) -> None:
-        """Update stats when files_scanned changes."""
-        try:
-            status_display = self.query_one("#stats-display", Static)
-            status_display.update(f"""
-[stat-label]Files:[/stat-label] [stat-value]{count}[/stat-value] / [stat-value]{self.total_files}[/stat-value]
-[stat-label]Findings:[/stat-label] [critical]{self.critical_count}[/critical] [high]{self.high_count}[/high] [medium]{self.medium_count}[/medium] [low]{self.low_count}[/low]
-[stat-label]Status:[/stat-label] [cyan]{self.status_text}[/cyan]
-            """)
-        except Exception:
-            pass
-    
-    def watch_critical_count(self, count: int) -> None:
-        """Update stats when counts change."""
-        self._update_stats_display()
-    
-    def watch_high_count(self, count: int) -> None:
-        self._update_stats_display()
-    
-    def watch_medium_count(self, count: int) -> None:
-        self._update_stats_display()
-    
-    def watch_low_count(self, count: int) -> None:
-        self._update_stats_display()
-    
-    def _update_stats_display(self) -> None:
-        """Update the stats display."""
-        try:
-            status_display = self.query_one("#stats-display", Static)
-            status_display.update(f"""
-[stat-label]Files:[/stat-label] [stat-value]{self.files_scanned}[/stat-value] / [stat-value]{self.total_files}[/stat-value]
-[stat-label]Findings:[/stat-label] [critical]{self.critical_count}[/critical] [high]{self.high_count}[/high] [medium]{self.medium_count}[/medium] [low]{self.low_count}[/low]
-[stat-label]Status:[/stat-label] [cyan]{self.status_text}[/cyan]
-            """)
-        except Exception:
-            pass
     
     files_scanned = reactive(0)
     total_files = reactive(0)
@@ -320,6 +269,37 @@ class ScannerTUI(App):
         self.files_scanned += 1
         self.current_file_path = result.file_path
         
+        # Only update UI every 10 files to avoid overwhelming the event loop
+        if self.files_scanned % 10 != 0 and self.files_scanned != self.total_files:
+            if result.findings:
+                # Still add findings immediately but batch UI updates
+                try:
+                    table = self.query_one("#findings-table", DataTable)
+                    for finding in result.findings:
+                        self.findings.append(finding)
+                        if finding.threat_level == 'critical':
+                            self.critical_count += 1
+                        elif finding.threat_level == 'high':
+                            self.high_count += 1
+                        elif finding.threat_level == 'medium':
+                            self.medium_count += 1
+                        else:
+                            self.low_count += 1
+                        
+                        level_class = finding.threat_level
+                        table.add_row(
+                            f"[{level_class}]{finding.threat_level.upper()}[/]",
+                            Path(finding.file_path).name[:25],
+                            finding.signature_name[:20],
+                            str(finding.line_number),
+                            finding.category[:15],
+                            key=f"{finding.file_path}:{finding.line_number}"
+                        )
+                except Exception:
+                    pass
+            return
+        
+        # Batch update UI every 10 files
         try:
             progress_bar = self.query_one("#main-progress", ProgressBar)
             progress = (self.files_scanned / self.total_files * 100) if self.total_files > 0 else 0
@@ -327,6 +307,21 @@ class ScannerTUI(App):
         except Exception:
             pass
         
+        # Update status text
+        self.status_text = f"Scanning... {self.files_scanned}/{self.total_files}"
+        
+        # Update stats display
+        try:
+            status_display = self.query_one("#stats-display", Static)
+            status_display.update(f"""
+[stat-label]Files:[/stat-label] [stat-value]{self.files_scanned}[/stat-value] / [stat-value]{self.total_files}[/stat-value]
+[stat-label]Findings:[/stat-label] [critical]{self.critical_count}[/critical] [high]{self.high_count}[/high] [medium]{self.medium_count}[/medium] [low]{self.low_count}[/low]
+[stat-label]Status:[/stat-label] [cyan]{self.status_text}[/cyan]
+            """)
+        except Exception:
+            pass
+        
+        # Add findings for this batch
         if result.findings:
             try:
                 table = self.query_one("#findings-table", DataTable)
@@ -342,7 +337,6 @@ class ScannerTUI(App):
                         self.low_count += 1
                     
                     level_class = finding.threat_level
-                    
                     table.add_row(
                         f"[{level_class}]{finding.threat_level.upper()}[/]",
                         Path(finding.file_path).name[:25],
@@ -353,9 +347,6 @@ class ScannerTUI(App):
                     )
             except Exception:
                 pass
-        
-        if self.files_scanned % 10 == 0 or self.files_scanned == self.total_files:
-            self.status_text = f"Scanning... {self.files_scanned}/{self.total_files}"
     
     def _scan_done(self):
         self.scan_complete = True
