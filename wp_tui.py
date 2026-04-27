@@ -163,8 +163,59 @@ class ScannerTUI(App):
         """Called when paused state changes."""
         if paused:
             self.sub_title = "⏸ PAUSED"
+            self.status_text = "⏸ Paused"
         else:
             self.sub_title = "Real-time malware detection"
+            self.status_text = f"Scanning... {self.files_scanned}/{self.total_files}"
+    
+    def watch_status_text(self, text: str) -> None:
+        """Update status display when status_text changes."""
+        try:
+            status_display = self.query_one("#stats-display", Static)
+            status_display.update(f"""
+[stat-label]Files:[/stat-label] [stat-value]{self.files_scanned}[/stat-value] / [stat-value]{self.total_files}[/stat-value]
+[stat-label]Findings:[/stat-label] [critical]{self.critical_count}[/critical] [high]{self.high_count}[/high] [medium]{self.medium_count}[/medium] [low]{self.low_count}[/low]
+[stat-label]Status:[/stat-label] [cyan]{text}[/cyan]
+            """)
+        except Exception:
+            pass
+    
+    def watch_files_scanned(self, count: int) -> None:
+        """Update stats when files_scanned changes."""
+        try:
+            status_display = self.query_one("#stats-display", Static)
+            status_display.update(f"""
+[stat-label]Files:[/stat-label] [stat-value]{count}[/stat-value] / [stat-value]{self.total_files}[/stat-value]
+[stat-label]Findings:[/stat-label] [critical]{self.critical_count}[/critical] [high]{self.high_count}[/high] [medium]{self.medium_count}[/medium] [low]{self.low_count}[/low]
+[stat-label]Status:[/stat-label] [cyan]{self.status_text}[/cyan]
+            """)
+        except Exception:
+            pass
+    
+    def watch_critical_count(self, count: int) -> None:
+        """Update stats when counts change."""
+        self._update_stats_display()
+    
+    def watch_high_count(self, count: int) -> None:
+        self._update_stats_display()
+    
+    def watch_medium_count(self, count: int) -> None:
+        self._update_stats_display()
+    
+    def watch_low_count(self, count: int) -> None:
+        self._update_stats_display()
+    
+    def _update_stats_display(self) -> None:
+        """Update the stats display."""
+        try:
+            status_display = self.query_one("#stats-display", Static)
+            status_display.update(f"""
+[stat-label]Files:[/stat-label] [stat-value]{self.files_scanned}[/stat-value] / [stat-value]{self.total_files}[/stat-value]
+[stat-label]Findings:[/stat-label] [critical]{self.critical_count}[/critical] [high]{self.high_count}[/high] [medium]{self.medium_count}[/medium] [low]{self.low_count}[/low]
+[stat-label]Status:[/stat-label] [cyan]{self.status_text}[/cyan]
+            """)
+        except Exception:
+            pass
     
     files_scanned = reactive(0)
     total_files = reactive(0)
