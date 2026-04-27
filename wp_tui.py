@@ -130,6 +130,18 @@ class ScannerTUI(App):
         color: #7aa2f7;
     }
     
+    DataTable > .datatable--row {
+        background: #1a1b26;
+    }
+    
+    DataTable > .datatable--row:hover {
+        background: #24283b;
+    }
+    
+    DataTable > .datatable--row.-cursor {
+        background: #24283b;
+    }
+    
     #summary-box {
         background: #1a1b26;
         border: solid #7aa2f7;
@@ -146,6 +158,13 @@ class ScannerTUI(App):
         Binding("p", "toggle_pause", "Pause"),
         Binding("escape", "quit_app", "Quit", show=False),
     ]
+    
+    def watch__paused(self, paused: bool) -> None:
+        """Called when paused state changes."""
+        if paused:
+            self.sub_title = "⏸ PAUSED"
+        else:
+            self.sub_title = "Real-time malware detection"
     
     files_scanned = reactive(0)
     total_files = reactive(0)
@@ -203,6 +222,9 @@ class ScannerTUI(App):
         table.add_columns("Level", "File", "Threat", "Line", "Category")
         table.zebra_stripes = True
         table.cursor_type = "row"
+        
+        # Update status immediately
+        self.status_text = "Scanning..."
         
         self._scan_thread = threading.Thread(target=self._run_scan, daemon=True)
         self._scan_thread.start()
@@ -317,10 +339,12 @@ class ScannerTUI(App):
         self._paused = not self._paused
         if self._paused:
             self._pause_event.clear()
-            self.status_text = "⏸ Paused - press 'p' to resume"
+            self.status_text = "⏸ Paused"
+            self.sub_title = "Paused - press 'p' to resume"
         else:
             self._pause_event.set()
             self.status_text = f"Scanning... {self.files_scanned}/{self.total_files}"
+            self.sub_title = "Real-time malware detection"
     
     def action_show_summary(self) -> None:
         """Show summary or progress info."""
