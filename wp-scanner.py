@@ -1240,146 +1240,27 @@ Examples:
 
 
 # =============================================================================
-# TUI (TEXTUAL) - Optional Import
+# TUI (TEXTUAL) - External Module Import
 # =============================================================================
 
-try:
-    from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer, DataTable, Label, ProgressBar, Static
-    from textual.containers import Container, Vertical
-    from textual.binding import Binding
-    from textual.reactive import reactive
-    TEXTUAL_AVAILABLE = True
-except ImportError:
-    TEXTUAL_AVAILABLE = False
-
-
-class ScannerTUI(App):
-    """Textual TUI for the malware scanner."""
-    
-    CSS = """
-    Screen {
-        background: #0b0c15;
-    }
-    
-    #status-bar {
-        height: 3;
-        margin: 1;
-        background: #1a1b26;
-        border: solid #414868;
-    }
-    
-    #current-file {
-        height: 3;
-        margin: 1;
-        background: #1a1b26;
-        color: #7aa2f7;
-    }
-    
-    #findings-panel {
-        height: 10;
-        margin: 1;
-        background: #1a1b26;
-        border: solid #414868;
-    }
-    
-    .critical { color: #f7768e; }
-    .high { color: #ff9e64; }
-    .medium { color: #e0af68; }
-    .low { color: #9ece6a; }
-    
-    DataTable {
-        height: 1fr;
-    }
-    """
-    
-    BINDINGS = [
-        Binding("q", "quit", "Quit"),
-        Binding("d", "toggle_dark", "Toggle Dark"),
-    ]
-    
-    progress = reactive(0.0)
-    files_scanned = reactive(0)
-    total_files = reactive(0)
-    findings_count = reactive(0)
-    current_file = reactive("")
-    
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.findings: List[Finding] = []
-    
-    def compose(self) -> ComposeResult:
+def run_tui_scan(scanner: FileScanner, path: str, threads: int) -> int:
+    """Run scan with TUI using external wp_tui module."""
+    try:
+        from wp_tui import run_tui_app, TEXTUAL_AVAILABLE
+        
         if not TEXTUAL_AVAILABLE:
-            yield Label("Textual not installed. Run: pip install textual")
-            return
+            print("Textual TUI not installed.")
+            print("Install with: pip install textual")
+            print("Or use --no-tui for headless mode.")
+            print("")
+            return 1
         
-        yield Header(show_clock=True)
-        yield Static(f"[bold]Scanning...[/]", id="status-bar")
-        yield Static(f"[cyan]Current file: {self.current_file}[/]", id="current-file")
-        yield ProgressBar(total=100, show_eta=False, id="progress")
-        yield DataTable(id="findings-table")
-        yield Footer()
+        return run_tui_app(scanner, path, threads)
     
-    def on_mount(self) -> None:
-        if not TEXTUAL_AVAILABLE:
-            return
-        
-        table = self.query_one("#findings-table", DataTable)
-        table.add_columns("Level", "File", "Threat", "Line")
-    
-    def update_progress(self, scanned: int, total: int, result: ScanResult) -> None:
-        """Update progress from scanner callback."""
-        self.files_scanned = scanned
-        self.total_files = total
-        self.progress = (scanned / total * 100) if total > 0 else 0
-        self.current_file = result.file_path
-        
-        if result.findings:
-            self.findings_count += len(result.findings)
-            self.findings.extend(result.findings)
-            
-            # Update table
-            table = self.query_one("#findings-table", DataTable)
-            for finding in result.findings:
-                level_class = finding.threat_level
-                table.add_row(
-                    f"[{level_class}]{finding.threat_level.upper()}[/{level_class}]",
-                    Path(finding.file_path).name[:30],
-                    finding.signature_name[:25],
-                    str(finding.line_number),
-                    key=finding.file_path + str(finding.line_number)
-                )
-    
-    def action_toggle_dark(self) -> None:
-        self.theme = "textual-dark" if self.theme == "textual-light" else "textual-light"
-
-
-def run_tui_scan(scanner: FileScanner, path: str, threads: int) -> Tuple[List[ScanResult], ScanStats]:
-    """Run scan with TUI."""
-    import time
-    
-    start_time = time.time()
-    results: List[ScanResult] = []
-    
-    def progress_callback(scanned: int, total: int, result: ScanResult):
-        results.append(result)
-    
-    files = scanner.collect_files(Path(path))
-    
-    # Run scan
-    with ThreadPoolExecutor(max_workers=threads) as executor:
-        future_to_file = {executor.submit(scanner.scan_file, f): f for f in files}
-        
-        for future in as_completed(future_to_file):
-            result = future.result()
-            results.append(result)
-            progress_callback(len(results), len(files), result)
-    
-    # Calculate stats
-    end_time = time.time()
-    stats = calculate_stats(results, start_time, end_time)
-    
-    return results, stats
+    except ImportError as e:
+        print(f"Could not load TUI module: {e}")
+        print("Falling back to headless mode...")
+        return 0
 
 
 def calculate_stats(results: List[ScanResult], start_time: float, end_time: float) -> ScanStats:
@@ -1543,28 +1424,16 @@ def main():
                             print(f"Quarantined: {filepath} -> {quarantined}")
     
     else:
-        # TUI mode
-        if not TEXTUAL_AVAILABLE:
-            print("Textual TUI not installed. Installing...")
-            print("Or run with --no-tui for headless mode.")
+        # TUI mode - use external wp_tui module
+        if not args.quiet:
+            print("Starting TUI scanner...")
+            print("Press 'q' to quit, 's' for summary")
             print("")
-            # Fall back to headless
-            results = scanner.scan_directory(args.path)
-            end_time = datetime.now()
-            stats = calculate_stats(results, start_time.timestamp(), end_time.timestamp())
-            report = ReportGenerator.generate_text_report(results, stats)
-            print(report)
-        else:
-            # Run with TUI
-            app = ScannerTUI()
-            
-            def run_scan():
-                results = scanner.scan_directory(args.path, progress_callback=app.update_progress)
-                return results
-            
-            # Note: Full async integration would need more work
-            # For now, fall back to headless with progress
-            print("Starting scan with TUI...")
+        
+        exit_code = run_tui_scan(scanner, args.path, args.threads)
+        
+        if exit_code != 0:
+            # TUI returned early or failed, show text report
             results = scanner.scan_directory(args.path)
             end_time = datetime.now()
             stats = calculate_stats(results, start_time.timestamp(), end_time.timestamp())
