@@ -24,3 +24,47 @@ v0.2:
 
 v0.1:
  * Initial version
+
+## Installation
+
+### pip
+
+Install from the current directory:
+
+```bash
+pip install .
+```
+
+Install with TUI dependencies:
+
+```bash
+pip install ".[tui]"
+```
+
+### pipx
+
+Install as an isolated CLI app:
+
+```bash
+pipx install .
+```
+
+Install with TUI dependencies:
+
+```bash
+pipx install --pip-args='.[tui]' .
+```
+
+## Usage
+
+Run scanner from any directory:
+
+```bash
+wp-scanner /path/to/wordpress
+```
+
+Run headless mode:
+
+```bash
+wp-scanner /path/to/wordpress --no-tui
+```

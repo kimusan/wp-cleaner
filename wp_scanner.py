@@ -1,0 +1,1623 @@
+#!/usr/bin/env python3
+"""
+WordPress Malware Scanner
+A modern, multi-threaded scanner for detecting malware, backdoors, and crypto miners
+in WordPress installations.
+
+Author: Kim Schulz <kim@schulz.dk>
+GitHub: github.com/kimusan/wp-cleaner
+"""
+
+import os
+import sys
+import re
+import csv
+import json
+import bisect
+import math
+import html
+import shutil
+import getpass
+import asyncio
+import argparse
+import logging
+import time
+from datetime import datetime
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Tuple
+from enum import Enum
+
+try:
+    from textual.app import App, ComposeResult
+    from textual.binding import Binding
+    from textual.containers import Container, Horizontal
+    from textual.reactive import reactive
+    from textual.screen import ModalScreen
+    from textual.widgets import Header, Footer, DataTable, Label, ProgressBar, Static, Button
+    try:
+        from textual.widgets import TextArea
+    except Exception:
+        TextArea = None
+    TEXTUAL_AVAILABLE = True
+except ImportError:
+    TEXTUAL_AVAILABLE = False
+    TEXTUAL_IMPORT_ERROR = "textual is not installed"
+else:
+    TEXTUAL_IMPORT_ERROR = ""
+
+try:
+    from rich.syntax import Syntax
+    from rich.panel import Panel
+    from rich.text import Text
+    RICH_AVAILABLE = True
+    RICH_IMPORT_ERROR = ""
+except ImportError:
+    Syntax = None
+    Panel = None
+    Text = None
+    RICH_AVAILABLE = False
+    RICH_IMPORT_ERROR = "rich is not installed"
+
+if TEXTUAL_AVAILABLE and not RICH_AVAILABLE:
+    TEXTUAL_AVAILABLE = False
+    TEXTUAL_IMPORT_ERROR = f"{TEXTUAL_IMPORT_ERROR}; {RICH_IMPORT_ERROR}".strip("; ").strip()
+try:
+    from pygments.lexers import guess_lexer_for_filename, get_lexer_by_name, find_lexer_class
+except Exception:
+    guess_lexer_for_filename = None
+    get_lexer_by_name = None
+    find_lexer_class = None
+
+# Version
+__version__ = "1.3.0"
+
+SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+SEVERITY_STYLES = {
+    "critical": "#ff4d4f",
+    "high": "#ff9f1a",
+    "medium": "#ffd166",
+    "low": "#66d9ef",
+}
+
+# =============================================================================
+# DATA CLASSES AND ENUMS
+# =============================================================================
+
+class ThreatLevel(Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+class ScanStatus(Enum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    ERROR = "error"
+
+@dataclass
+class Signature:
+    id: str
+    name: str
+    pattern: str
+    description: str
+    threat_level: ThreatLevel
+    category: str
+    remediation: str
+    is_regex: bool = True
+
+@dataclass
+class Finding:
+    file_path: str
+    line_number: int
+    signature_id: str
+    signature_name: str
+    threat_level: str
+    category: str
+    matched_content: str
+    context_before: str
+    context_after: str
+    description: str
+    remediation: str
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+
+@dataclass
+class ScanResult:
+    file_path: str
+    status: str
+    findings: List[Finding] = field(default_factory=list)
+    error: Optional[str] = None
+    scan_time_ms: float = 0.0
+
+@dataclass
+class ScanStats:
+    total_files: int = 0
+    scanned_files: int = 0
+    infected_files: int = 0
+    total_findings: int = 0
+    critical: int = 0
+    high: int = 0
+    medium: int = 0
+    low: int = 0
+    start_time: str = ""
+    end_time: str = ""
+    scan_duration_seconds: float = 0.0
+
+
+# =============================================================================
+# SIGNATURE DATABASE
+# =============================================================================
+
+def get_builtin_signatures() -> List[Signature]:
+    """Return the full built-in signature database."""
+    return [
+        Signature("WP001", "FilesMan Backdoor", r"FilesMan", "FilesMan backdoor - common WordPress backdoor", ThreatLevel.CRITICAL, "backdoor", "Remove the infected file or clean the malicious code"),
+        Signature("WP002", "Base64 Decode Return", r'"base64_decode"\s*;\s*return', "Obfuscated code using base64_decode with return", ThreatLevel.HIGH, "obfuscation", "Decode and analyze the payload, then remove malicious code"),
+        Signature("WP003", "GLOBALS Injection", r';\s*\$GLOBALS', "Suspicious GLOBALS variable access", ThreatLevel.MEDIUM, "injection", "Review code for unauthorized variable injection"),
+        Signature("WP004", "Variable Variable", r'<?php\s*\${', "Variable variable syntax - often used in backdoors", ThreatLevel.HIGH, "backdoor", "Remove the malicious code block"),
+        Signature("WP005", "Array Assignment Backdoor", r'<?php\s*\$array\s*=\s*array\s*\(', "Suspicious array assignment pattern", ThreatLevel.MEDIUM, "backdoor", "Verify if this is legitimate code or backdoor"),
+        Signature("WP006", "Mail Stripslashes", r'mail\s*\(\s*stripslashes\s*\(', "Mail function with stripslashes - spam indicator", ThreatLevel.HIGH, "spam", "Remove spam-sending code"),
+        Signature("WP007", "Array Diff Ukey", r'<?php\s*@array_diff_ukey\s*\(', "array_diff_ukey backdoor pattern", ThreatLevel.CRITICAL, "backdoor", "Remove the infected file"),
+        Signature("WP008", "Request Chr Injection", r'\$_REQUEST\s*\[\s*chr\s*\(', "REQUEST with chr() - command injection", ThreatLevel.CRITICAL, "injection", "Remove the malicious code"),
+        Signature("WP009", "Eval Variable", r'eval\s*\(\s*\${', "Eval with variable - code execution", ThreatLevel.CRITICAL, "backdoor", "Remove the eval statement and analyze payload"),
+        Signature("WP010", "Isset Variable Variable", r'isset\s*\(\s*\${', "Isset with variable variable", ThreatLevel.MEDIUM, "suspicious", "Review for malicious intent"),
+        Signature("WP011", "PhpReverseProxy", r'PhpReverseProxy', "PHP Reverse Proxy backdoor", ThreatLevel.CRITICAL, "backdoor", "Remove the entire file"),
+        Signature("WP012", "Str Rot13", r'str_rot13\s*\(', "ROT13 encoding - often used to hide code", ThreatLevel.MEDIUM, "obfuscation", "Decode and verify content"),
+        Signature("WP013", "Set Time Limit Zero", r'@set_time_limit\s*\(\s*0\s*\)', "Removing time limit - common in long-running malware", ThreatLevel.MEDIUM, "suspicious", "Review if legitimate or crypto miner"),
+        Signature("WP014", "Sha1 Strripos", r'strripos\s*\(\s*@sha1\s*\(', "SHA1 comparison pattern", ThreatLevel.HIGH, "backdoor", "Remove the authentication bypass code"),
+        Signature("WP015", "Assert Function", r'@assert\s*\(', "Assert function - can execute arbitrary code", ThreatLevel.HIGH, "backdoor", "Remove the assert statement"),
+        Signature("WP016", "Made in China Link", r'made-in-china\.com', "Suspicious external link", ThreatLevel.LOW, "seo_spam", "Remove the spam link"),
+        Signature("WP017", "Curl Exec Trim", r'trim\s*\(\s*curl_exec\s*\(', "Curl execution with trim", ThreatLevel.MEDIUM, "suspicious", "Verify the curl usage is legitimate"),
+        Signature("WP018", "Rot13 Obfuscated", r'onfr64_qrpbqr', "ROT13 encoded string (base64_qrpbqr)", ThreatLevel.HIGH, "obfuscation", "Decode and remove malicious code"),
+        Signature("WP019", "Obfuscated Function Chain", r"function.?for.?strlen.*?isset", "Obfuscated function pattern - potential malware", ThreatLevel.HIGH, "obfuscation", "Analyze and remove the obfuscated code"),
+        Signature("WP020", "Eval Hex Function", r'eval\s*\(\s*function\s*_0x', "Hex-encoded eval function", ThreatLevel.CRITICAL, "backdoor", "Remove the entire malicious block"),
+        Signature("WP021", "Base64 Decode Eval", r'eval\s*\(\s*base64_decode\s*\(', "Eval with base64_decode - very common backdoor", ThreatLevel.CRITICAL, "backdoor", "Remove the eval statement and decode payload for analysis"),
+        Signature("WP022", "Gzip Uncompress", r'gzuncompress\s*\(\s*base64_decode', "Compressed and encoded payload", ThreatLevel.HIGH, "obfuscation", "Decode and decompress to analyze"),
+        Signature("WP023", "Preg Replace Eval", r'preg_replace\s*\([^)]*\/e[^)]*\)', "Preg_replace with /e modifier - code execution", ThreatLevel.HIGH, "injection", "Remove or replace with preg_replace_callback"),
+        Signature("WP024", "Create Function", r'create_function\s*\(', "create_function - arbitrary code execution", ThreatLevel.HIGH, "backdoor", "Replace with anonymous function or remove"),
+        Signature("WP025", "Shell Exec", r'shell_exec\s*\(', "Shell execution function", ThreatLevel.CRITICAL, "backdoor", "Remove unless legitimately needed"),
+        Signature("WP026", "System Call", r'\bsystem\s*\(', "System call - command execution", ThreatLevel.CRITICAL, "backdoor", "Remove unless legitimately needed"),
+        Signature("WP027", "Passthru", r'passthru\s*\(', "Passthru - command execution", ThreatLevel.CRITICAL, "backdoor", "Remove unless legitimately needed"),
+        Signature("WP028", "Proc Open", r'proc_open\s*\(', "Process opening - command execution", ThreatLevel.CRITICAL, "backdoor", "Remove unless legitimately needed"),
+        Signature("WP029", "Pcntl Exec", r'pcntl_exec\s*\(', "Process control execution", ThreatLevel.CRITICAL, "backdoor", "Remove unless legitimately needed"),
+        Signature("WP030", "Socket Connect", r'socket_connect\s*\(', "Socket connection - potential C2", ThreatLevel.HIGH, "backdoor", "Verify if legitimate or command & control"),
+        Signature("WP031", "Fsockopen", r'fsockopen\s*\(', "File socket open - potential C2", ThreatLevel.MEDIUM, "suspicious", "Verify the destination is legitimate"),
+        Signature("WP032", "Curl Init", r'curl_init\s*\(', "Curl initialization", ThreatLevel.LOW, "suspicious", "Verify curl usage is legitimate"),
+        Signature("WP033", "Wp Config Get", r'get_currentuserinfo|wp_get_current_user', "WordPress user info access", ThreatLevel.LOW, "suspicious", "Verify in context - could be credential harvester"),
+        Signature("WP034", "Admin Email Grabber", r'get_option\s*\(\s*[\'"]admin_email', "Admin email retrieval", ThreatLevel.MEDIUM, "data_theft", "Verify if used for spam or legitimate purpose"),
+        Signature("WP035", "Wp Users Query", r'WP_User_Query|get_users', "User query - potential data harvesting", ThreatLevel.MEDIUM, "data_theft", "Verify the purpose of user enumeration"),
+        Signature("WP036", "Crypto Miner Pool", r'(stratum+tcp|cryptonight|monero|bitcoin)', "Cryptocurrency mining pool connection", ThreatLevel.CRITICAL, "crypto_miner", "Remove the miner and check for persistence"),
+        Signature("WP037", "Coinhive", r'coinhive|cnv1\.js', "Coinhive crypto miner", ThreatLevel.CRITICAL, "crypto_miner", "Remove Coinhive integration"),
+        Signature("WP038", "Jquery Load Suspicious", r'\$\.getScript\s*\([^)]*\.js', "Dynamic script loading", ThreatLevel.MEDIUM, "suspicious", "Verify the script source is legitimate"),
+        Signature("WP039", "Document Write", r'document\.write\s*\(', "Document write - potential XSS", ThreatLevel.MEDIUM, "injection", "Review for malicious content injection"),
+        Signature("WP040", "FromCharCode", r'fromCharCode\s*\(', "Character code conversion - often obfuscated", ThreatLevel.MEDIUM, "obfuscation", "Decode and verify the actual content"),
+        Signature("WP041", "Iframe Inject", r'<iframe[^>]*style\s*=\s*[\'"][^\'"]*display:\s*none', "Hidden iframe - potential malware delivery", ThreatLevel.HIGH, "injection", "Remove the hidden iframe"),
+        Signature("WP042", "Script Src External", r'<script[^>]*src\s*=\s*[\'"][^\'"]*(?:pastebin|raw.github|bit.ly)', "External script from suspicious source", ThreatLevel.HIGH, "injection", "Remove the external script reference"),
+        Signature("WP043", "Eval Gzip", r'eval\s*\(\s*gzinflate\s*\(\s*base64_decode', "Eval with gzinflate and base64", ThreatLevel.CRITICAL, "backdoor", "Remove and decode payload for analysis"),
+        Signature("WP044", "Strtr Base64", r'strtr\s*\(\s*base64_decode', "String translation with base64", ThreatLevel.HIGH, "obfuscation", "Decode and analyze the payload"),
+        Signature("WP045", "Pack Base64", r'pack\s*\(\s*[\'"]H[\'"]\s*,\s*base64_decode', "Pack with base64 - heavy obfuscation", ThreatLevel.HIGH, "obfuscation", "Decode and analyze"),
+        Signature("WP046", "Call User Func", r'call_user_func\s*\(\s*[\'"]assert', "Call user func with assert", ThreatLevel.CRITICAL, "backdoor", "Remove the malicious call"),
+        Signature("WP047", "Array Map Assert", r'array_map\s*\(\s*[\'"]assert', "Array map with assert", ThreatLevel.CRITICAL, "backdoor", "Remove the malicious code"),
+        Signature("WP048", "Wp Option Add", r'add_option|update_option.*siteurl', "Site URL modification", ThreatLevel.HIGH, "defacement", "Verify and restore correct URL"),
+        Signature("WP049", "Htaccess Modify", r'RewriteRule.*\$', "Suspicious htaccess rewrite rule", ThreatLevel.MEDIUM, "defacement", "Review and clean htaccess"),
+        Signature("WP050", "Phar Stream", r'phar://', "Phar stream wrapper - potential RCE", ThreatLevel.HIGH, "injection", "Remove unless legitimately needed"),
+        Signature("WP051", "Viagra Cialis", r'(viagra|cialis|pharmacy|pills)', "Pharmaceutical spam keywords", ThreatLevel.LOW, "seo_spam", "Remove spam content"),
+        Signature("WP052", "Casino Gambling", r'(casino|poker|blackjack|gambling)', "Gambling spam keywords", ThreatLevel.LOW, "seo_spam", "Remove spam content"),
+        Signature("WP053", "Replica Watch", r'(replica|rolex|omega|watches)', "Replica product spam", ThreatLevel.LOW, "seo_spam", "Remove spam content"),
+        Signature("WP054", "Cheap Meds", r'(cheap.*meds|prescription.*online)', "Online pharmacy spam", ThreatLevel.LOW, "seo_spam", "Remove spam content"),
+        Signature("WP055", "Adult Content", r'(xxx|porn|sex|adult.*content)', "Adult content spam", ThreatLevel.LOW, "seo_spam", "Remove spam content"),
+        Signature("WP056", "Backdoor File Name", r'(c9|r57|ws0|b374k|wso)\.php', "Known backdoor filename pattern", ThreatLevel.CRITICAL, "backdoor", "Delete the entire file"),
+        Signature("WP057", "Shell File Name", r'(shell|hack|exploit|inject)\.php', "Suspicious filename pattern", ThreatLevel.HIGH, "backdoor", "Review and likely delete"),
+        Signature("WP058", "Temp PHP File", r'tmp_[a-z0-9]+\.php', "Temporary PHP file - potential dropped payload", ThreatLevel.MEDIUM, "suspicious", "Review content and delete if malicious"),
+        Signature("WP059", "Uploads PHP File", r'wp-content/uploads/[^/]+\.php', "PHP file in uploads directory", ThreatLevel.HIGH, "backdoor", "Delete - PHP should not be in uploads"),
+        Signature("WP060", "Cache PHP File", r'wp-content/cache/[^/]+\.php', "PHP file in cache directory", ThreatLevel.MEDIUM, "suspicious", "Review and delete if not legitimate"),
+        Signature("WP061", "Hex String", r'0x[0-9a-fA-F]{20,}', "Long hex string - potential obfuscated code", ThreatLevel.MEDIUM, "obfuscation", "Decode and verify content"),
+        Signature("WP062", "Chr Concat", r'(chr\s*\(\s*\d+\s*\)\s*\.\s*)+', "Chr() concatenation - string obfuscation", ThreatLevel.HIGH, "obfuscation", "Decode the concatenated string"),
+        Signature("WP063", "Ord Chr Mix", r'ord\s*\(\s*chr\s*\(', "Ord/chr manipulation - obfuscation", ThreatLevel.MEDIUM, "obfuscation", "Analyze the actual output"),
+        Signature("WP064", "Xor Encryption", r'\^\s*[\'"]', "XOR encryption pattern", ThreatLevel.HIGH, "obfuscation", "Decrypt and analyze payload"),
+        Signature("WP065", "Base64 String", r'(?<![A-Za-z0-9+/=])(?=[A-Za-z0-9+/=]*[A-Za-z])(?=[A-Za-z0-9+/=]*\d)(?:[A-Za-z0-9+/]{4}){16,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![A-Za-z0-9+/=])', "Long base64 string", ThreatLevel.LOW, "obfuscation", "Decode and verify content"),
+        Signature("WP066", "Wp Cron Exploit", r'wp-cron\.php.*\?', "Potential wp-cron exploitation", ThreatLevel.MEDIUM, "suspicious", "Verify cron usage is legitimate"),
+        Signature("WP067", "Xmlrpc Exploit", r'xmlrpc\.php.*system\.', "XML-RPC exploitation attempt", ThreatLevel.HIGH, "injection", "Disable xmlrpc.php or block access"),
+        Signature("WP068", "Rest Api Abuse", r'wp-json\s*/\s*users', "REST API user enumeration", ThreatLevel.MEDIUM, "data_theft", "Restrict REST API access"),
+        Signature("WP069", "Wp Config Backup", r'wp-config\.php\.(bak|old|save|orig)', "WordPress config backup file", ThreatLevel.HIGH, "data_theft", "Delete backup files immediately"),
+        Signature("WP070", "Debug Log Enabled", r'WP_DEBUG.*true', "Debug mode enabled in production", ThreatLevel.MEDIUM, "info_leak", "Disable WP_DEBUG in production"),
+        Signature("WP071", "Header Location", r'header\s*\(\s*[\'"]Location:', "HTTP redirect header", ThreatLevel.MEDIUM, "redirect", "Verify redirect is legitimate"),
+        Signature("WP072", "Js Window Location", r'window\.location\s*=\s*[\'"]', "JavaScript redirect", ThreatLevel.MEDIUM, "redirect", "Verify redirect destination"),
+        Signature("WP073", "Meta Refresh", r'<meta[^>]*http-equiv\s*=\s*[\'"]refresh', "Meta refresh redirect", ThreatLevel.MEDIUM, "redirect", "Remove if malicious redirect"),
+        Signature("WP074", "Base64 In Cookie", r'\butter_cookie.*base64', "Base64 encoded cookie handling", ThreatLevel.MEDIUM, "suspicious", "Verify cookie handling is safe"),
+        Signature("WP075", "Unserialize User Input", r'unserialize\s*\(\s*\$_(GET|POST|REQUEST|COOKIE)', "Unserialize with user input - RCE risk", ThreatLevel.CRITICAL, "injection", "Replace with json_decode or validate input"),
+        Signature("WP076", "File Get Contents Remote", r'file_get_contents\s*\(\s*http', "Remote file fetching", ThreatLevel.MEDIUM, "suspicious", "Verify the remote source is trusted"),
+        Signature("WP077", "Fopen Remote", r'fopen\s*\(\s*http', "Remote file opening", ThreatLevel.MEDIUM, "suspicious", "Verify the remote source is trusted"),
+        Signature("WP078", "File Put Contents", r'file_put_contents\s*\([^,]*\$_', "File write with user input", ThreatLevel.HIGH, "injection", "Sanitize input or remove"),
+        Signature("WP079", "Unlink Call", r'unlink\s*\(', "File deletion function", ThreatLevel.MEDIUM, "suspicious", "Verify deletion is legitimate"),
+        Signature("WP080", "Chmod Call", r'chmod\s*\(', "Permission change function", ThreatLevel.MEDIUM, "suspicious", "Verify permission change is needed"),
+        Signature("WP081", "Mysql Connect", r'mysql_connect|mysqli_connect', "Database connection", ThreatLevel.LOW, "suspicious", "Verify database connection is legitimate"),
+        Signature("WP082", "Query Execution", r'mysql_query|mysqli_query.*\$_', "Query with user input", ThreatLevel.HIGH, "injection", "Use prepared statements"),
+        Signature("WP083", "Wpdb Prepare Missing", r'\$wpdb->query\s*\([^)]*\$_', "WPDB query without prepare", ThreatLevel.HIGH, "injection", "Use $wpdb->prepare()") ,
+        Signature("WP084", "Error Suppression", r'@\s*(include|require|eval)', "Error suppression on dangerous functions", ThreatLevel.MEDIUM, "evasion", "Review for malicious intent"),
+        Signature("WP085", "Conditional Include", r'if\s*\(\s*!\s*defined\s*\(', "Conditional include pattern", ThreatLevel.LOW, "evasion", "Verify the condition is legitimate"),
+        Signature("WP086", "Time Based Execution", r'time\s*\(\s*\)\s*[<>=]', "Time-based condition - potential time bomb", ThreatLevel.MEDIUM, "evasion", "Check for time-based malware"),
+        Signature("WP087", "Domain Check", r'\$_SERVER\s*\[\s*[\'"]HTTP_HOST', "Domain checking - potential cloaking", ThreatLevel.MEDIUM, "evasion", "Verify for SEO cloaking"),
+        Signature("WP088", "User Agent Check", r'\$_SERVER\s*\[\s*[\'"]HTTP_USER_AGENT', "User agent checking - potential cloaking", ThreatLevel.MEDIUM, "evasion", "Verify for search engine cloaking"),
+        Signature("WP089", "Referrer Check", r'\$_SERVER\s*\[\s*[\'"]HTTP_REFERER', "Referrer checking - potential cloaking", ThreatLevel.LOW, "evasion", "Verify for traffic filtering"),
+        Signature("WP090", "IP Address Check", r'\$_SERVER\s*\[\s*[\'"]REMOTE_ADDR', "IP address checking", ThreatLevel.MEDIUM, "evasion", "Verify for access control or cloaking"),
+        Signature("WP091", "Lambda Function", r'create_function|lambda\s*function', "Anonymous function creation - code execution", ThreatLevel.HIGH, "backdoor", "Review and remove if malicious"),
+        Signature("WP092", "Callback Injection", r'call_user_func_array', "Callback injection potential", ThreatLevel.MEDIUM, "injection", "Verify callbacks are safe"),
+        Signature("WP093", "Variable Function", r'\$\{?\w+\}?\s*\(', "Variable function call", ThreatLevel.MEDIUM, "backdoor", "Verify function call is safe"),
+        Signature("WP094", "Dynamic Property", r'\$\$\w+|\$\{\$', "Dynamic property access", ThreatLevel.MEDIUM, "injection", "Review for property injection"),
+        Signature("WP095", "Include From Variable", r'(include|require)\s*\(\s*\$', "Include from variable", ThreatLevel.HIGH, "backdoor", "Ensure variable is sanitized"),
+        Signature("WP096", "Bitcoin Wallet", r'(1|3)[a-km-zA-HJ-NP-Z1-9]{25,34}', "Bitcoin wallet address pattern", ThreatLevel.LOW, "crypto_spam", "Remove if spam content"),
+        Signature("WP097", "Ethereum Wallet", r'0x[a-fA-F0-9]{40}', "Ethereum wallet address", ThreatLevel.LOW, "crypto_spam", "Remove if spam content"),
+        Signature("WP098", "Mining Script", r'(cryptonight|randomx|monero-miner)', "Cryptocurrency mining script", ThreatLevel.CRITICAL, "crypto_miner", "Remove the miner immediately"),
+        Signature("WP099", "Suspicious Domain", r'(pastebin\.com|raw.githubusercontent.com|bit.ly|tinyurl)', "Reference to suspicious domain", ThreatLevel.MEDIUM, "suspicious", "Verify external resource is safe"),
+        Signature("WP100", "Data URI", r'data:text/html|data:application/javascript', "Data URI - potential XSS vector", ThreatLevel.MEDIUM, "injection", "Review data URI content"),
+    ]
+
+# =============================================================================
+# SIGNATURE MANAGER
+# =============================================================================
+
+class SignatureManager:
+    def __init__(self, custom_signature_file: Optional[str] = None):
+        self.signatures_by_id: Dict[str, Signature] = {}
+        self.custom_file = custom_signature_file
+
+    def load_builtin(self) -> int:
+        for sig in get_builtin_signatures():
+            self.signatures_by_id[sig.id] = sig
+        return len(self.signatures_by_id)
+
+    @staticmethod
+    def _parse_threat_level(value: str) -> ThreatLevel:
+        normalized = (value or "").strip().lower()
+        for level in ThreatLevel:
+            if level.value == normalized:
+                return level
+        raise ValueError(f"invalid threat_level '{value}'")
+
+    @staticmethod
+    def _normalize_custom_payload(payload) -> List[dict]:
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            signatures = payload.get("signatures")
+            if isinstance(signatures, list):
+                return signatures
+        raise ValueError("custom signature file must be a JSON list or {\"signatures\": [...]} object")
+
+    def load_custom(self, signature_file: Optional[str] = None) -> int:
+        source = signature_file or self.custom_file
+        if not source:
+            return 0
+        path = Path(source)
+        if not path.exists():
+            raise FileNotFoundError(f"custom signature file not found: {path}")
+
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        entries = self._normalize_custom_payload(raw)
+        loaded = 0
+        skipped = 0
+        for idx, entry in enumerate(entries, start=1):
+            try:
+                if not isinstance(entry, dict):
+                    raise ValueError("entry must be an object")
+                sig_id = str(entry["id"]).strip()
+                name = str(entry["name"]).strip()
+                pattern = str(entry["pattern"])
+                description = str(entry.get("description", "Custom signature match")).strip()
+                category = str(entry.get("category", "custom")).strip()
+                remediation = str(entry.get("remediation", "Review and remediate matched code.")).strip()
+                threat_level = self._parse_threat_level(str(entry.get("threat_level", "medium")))
+                is_regex = bool(entry.get("is_regex", True))
+                sig = Signature(
+                    id=sig_id,
+                    name=name,
+                    pattern=pattern,
+                    description=description,
+                    threat_level=threat_level,
+                    category=category,
+                    remediation=remediation,
+                    is_regex=is_regex,
+                )
+                self.signatures_by_id[sig.id] = sig
+                loaded += 1
+            except Exception as exc:
+                skipped += 1
+                logging.warning(f"Skipping custom signature entry #{idx}: {exc}")
+        if skipped:
+            logging.warning(f"Skipped {skipped} invalid custom signatures from {path}")
+        return loaded
+
+    def get_all(self) -> List[Signature]:
+        return list(self.signatures_by_id.values())
+
+# =============================================================================
+# FILE SCANNER
+# =============================================================================
+
+class FileScanner:
+    SCAN_EXTENSIONS = {'.php', '.js', '.html', '.htm', '.css', '.txt', '.md', '.json', '.xml', '.htaccess', '.ini', '.conf'}
+    SKIP_DIRS = {'.git', '.svn', '.hg', 'node_modules', '__pycache__', '.idea', '.vscode', '.DS_Store'}
+    MAX_MATCHES_PER_SIGNATURE_PER_FILE = 25
+    HEURISTIC_LONG_TOKEN_RE = re.compile(r"[A-Za-z0-9+/=]{180,}")
+
+    def __init__(self, signatures: List[Signature]):
+        self.signatures = signatures
+        self.compiled_patterns: List[Tuple[Signature, re.Pattern]] = []
+        for sig in signatures:
+            try:
+                flags = re.MULTILINE | re.IGNORECASE if sig.is_regex else 0
+                pattern = re.compile(sig.pattern, flags)
+                self.compiled_patterns.append((sig, pattern))
+            except re.error as e:
+                logging.warning(f"Invalid regex pattern {sig.id}: {e}")
+
+    def should_scan(self, filepath: Path) -> bool:
+        """Check if file should be scanned."""
+        if filepath.suffix.lower() not in self.SCAN_EXTENSIONS:
+            return False
+        if '.min.' in filepath.name:
+            return False
+        skip_patterns = ['wp-tinymce.js', 'tiny_mce.js', 'jquery.js', 'vendor.js']
+        if any(pattern in filepath.name.lower() for pattern in skip_patterns):
+            return False
+        try:
+            if filepath.stat().st_size > 2 * 1024 * 1024:  # 2MB limit
+                return False
+        except OSError:
+            return False
+        return True
+
+    @staticmethod
+    def _shannon_entropy(value: str) -> float:
+        if not value:
+            return 0.0
+        counts: Dict[str, int] = {}
+        for char in value:
+            counts[char] = counts.get(char, 0) + 1
+        length = len(value)
+        entropy = 0.0
+        for count in counts.values():
+            prob = count / length
+            entropy -= prob * math.log2(prob)
+        return entropy
+
+    @staticmethod
+    def _context_for_line(lines: List[str], line_num: int) -> Tuple[str, str]:
+        start = max(0, line_num - 4)
+        end = min(len(lines), line_num + 3)
+        context_before = "\n".join(lines[start:line_num - 1])
+        context_after = "\n".join(lines[line_num:end])
+        return context_before, context_after
+
+    def _heuristic_findings(self, filepath: Path, content: str, lines: List[str]) -> List[Finding]:
+        findings: List[Finding] = []
+        lower_path = str(filepath).replace("\\", "/").lower()
+        filename = filepath.name.lower()
+
+        # H001: Unexpected PHP in web-accessible uploads/cache paths.
+        if filepath.suffix.lower() == ".php" and (
+            "/wp-content/uploads/" in lower_path or "/wp-content/cache/" in lower_path
+        ):
+            findings.append(
+                Finding(
+                    file_path=str(filepath),
+                    line_number=1,
+                    signature_id="H001",
+                    signature_name="Heuristic: PHP In Uploads/Cache",
+                    threat_level=ThreatLevel.HIGH.value,
+                    category="heuristic_path",
+                    matched_content=str(filepath),
+                    context_before="",
+                    context_after=lines[0] if lines else "",
+                    description="PHP file located in uploads/cache path; this is a common malware drop location.",
+                    remediation="Move/inspect the file immediately and block PHP execution in uploads/cache directories.",
+                )
+            )
+
+        # H002: Suspicious filename pattern (double extension or hidden dot-php style).
+        if re.search(r"\.(php\d?|phtml)\.(jpg|jpeg|png|gif|ico|txt|log)$", filename) or filename.startswith(".") and ".php" in filename:
+            findings.append(
+                Finding(
+                    file_path=str(filepath),
+                    line_number=1,
+                    signature_id="H002",
+                    signature_name="Heuristic: Suspicious PHP Filename",
+                    threat_level=ThreatLevel.HIGH.value,
+                    category="heuristic_path",
+                    matched_content=filename,
+                    context_before="",
+                    context_after=lines[0] if lines else "",
+                    description="Suspicious filename camouflage (double extension or hidden php filename).",
+                    remediation="Verify file origin and purpose; quarantine if not part of known application code.",
+                )
+            )
+
+        # H003: Dangerous filesystem permissions.
+        try:
+            mode = filepath.stat().st_mode & 0o777
+            if mode & 0o002:
+                findings.append(
+                    Finding(
+                        file_path=str(filepath),
+                        line_number=1,
+                        signature_id="H003",
+                        signature_name="Heuristic: World-Writable File",
+                        threat_level=ThreatLevel.MEDIUM.value,
+                        category="heuristic_permissions",
+                        matched_content=oct(mode),
+                        context_before="",
+                        context_after=lines[0] if lines else "",
+                        description="File is world-writable, which is often abused by webshells and droppers.",
+                        remediation="Restrict file permissions (e.g., 0644 for files) and audit recent changes.",
+                    )
+                )
+        except OSError:
+            pass
+
+        # H004: High-entropy long token (possible packed/obfuscated payload).
+        for match in self.HEURISTIC_LONG_TOKEN_RE.finditer(content):
+            token = match.group(0)
+            entropy = self._shannon_entropy(token)
+            if entropy < 4.6:
+                continue
+            line_num = content[:match.start()].count("\n") + 1
+            context_before, context_after = self._context_for_line(lines, line_num)
+            findings.append(
+                Finding(
+                    file_path=str(filepath),
+                    line_number=line_num,
+                    signature_id="H004",
+                    signature_name="Heuristic: High-Entropy Token",
+                    threat_level=ThreatLevel.MEDIUM.value,
+                    category="heuristic_obfuscation",
+                    matched_content=token[:200],
+                    context_before=context_before,
+                    context_after=context_after,
+                    description=f"Long high-entropy token detected (entropy {entropy:.2f}), often used in encoded payloads.",
+                    remediation="Decode/review token origin and execution path; remove if unrelated to trusted application logic.",
+                )
+            )
+            break
+
+        return findings
+
+    def scan_file(self, filepath: Path) -> ScanResult:
+        start_time = time.monotonic()
+        findings: List[Finding] = []
+        seen_finding_keys: set[tuple[str, int, str]] = set()
+        signature_match_counts: Dict[str, int] = {}
+        try:
+            if not self.should_scan(filepath):
+                return ScanResult(file_path=str(filepath), status=ScanStatus.COMPLETED.value, findings=[])
+            
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+            lines = content.splitlines()
+            line_starts = [0]
+            for idx, char in enumerate(content):
+                if char == "\n":
+                    line_starts.append(idx + 1)
+            
+            for sig, pattern in self.compiled_patterns:
+                signature_match_counts.setdefault(sig.id, 0)
+                for match in pattern.finditer(content):
+                    if signature_match_counts[sig.id] >= self.MAX_MATCHES_PER_SIGNATURE_PER_FILE:
+                        break
+                    line_num = bisect.bisect_right(line_starts, match.start())
+                    matched_text = match.group(0)[:200]
+                    dedupe_key = (sig.id, line_num, matched_text)
+                    if dedupe_key in seen_finding_keys:
+                        continue
+                    start = max(0, line_num - 4)
+                    end = min(len(lines), line_num + 3)
+                    context_before = "\n".join(lines[start:line_num - 1])
+                    context_after = "\n".join(lines[line_num:end])
+                    findings.append(Finding(file_path=str(filepath), line_number=line_num, signature_id=sig.id, signature_name=sig.name, threat_level=sig.threat_level.value, category=sig.category, matched_content=matched_text, context_before=context_before, context_after=context_after, description=sig.description, remediation=sig.remediation))
+                    seen_finding_keys.add(dedupe_key)
+                    signature_match_counts[sig.id] += 1
+
+            findings.extend(self._heuristic_findings(filepath, content, lines))
+            
+            scan_time = (time.monotonic() - start_time) * 1000
+            return ScanResult(file_path=str(filepath), status=ScanStatus.COMPLETED.value, findings=findings, scan_time_ms=scan_time)
+        except Exception as e:
+            return ScanResult(file_path=str(filepath), status=ScanStatus.ERROR.value, error=str(e))
+
+    def collect_files(self, root_path: Path) -> List[Path]:
+        files: List[Path] = []
+        for root, dirs, filenames in os.walk(root_path, topdown=True):
+            dirs[:] = [d for d in dirs if d not in self.SKIP_DIRS]
+            for filename in filenames:
+                filepath = Path(root) / filename
+                if self.should_scan(filepath):
+                    files.append(filepath)
+        return files
+
+# =============================================================================
+# REPORT GENERATOR
+# =============================================================================
+class ReportGenerator:
+    @staticmethod
+    def findings_sorted(results: List[ScanResult]) -> List[Finding]:
+        severity_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+        all_findings = [f for r in results for f in r.findings]
+        all_findings.sort(key=lambda f: (severity_order.get(f.threat_level, 4), f.file_path, f.line_number))
+        return all_findings
+
+    @staticmethod
+    def generate_json_report(results: List[ScanResult], stats: ScanStats) -> Dict:
+        return {
+            "generated_at": datetime.now().isoformat(),
+            "scan_stats": {
+                "total_files": stats.total_files,
+                "scanned_files": stats.scanned_files,
+                "infected_files": stats.infected_files,
+                "total_findings": stats.total_findings,
+                "critical": stats.critical,
+                "high": stats.high,
+                "medium": stats.medium,
+                "low": stats.low,
+                "scan_duration_seconds": stats.scan_duration_seconds,
+            },
+            "findings": [
+                {
+                    "file_path": f.file_path,
+                    "line_number": f.line_number,
+                    "signature_id": f.signature_id,
+                    "signature_name": f.signature_name,
+                    "threat_level": f.threat_level,
+                    "category": f.category,
+                    "matched_content": f.matched_content,
+                    "description": f.description,
+                    "remediation": f.remediation,
+                    "timestamp": f.timestamp,
+                }
+                for f in ReportGenerator.findings_sorted(results)
+            ],
+        }
+
+    @staticmethod
+    def generate_html_report(results: List[ScanResult], stats: ScanStats) -> str:
+        findings = ReportGenerator.findings_sorted(results)
+        rows = []
+        for finding in findings:
+            severity_class = f"sev-{finding.threat_level}"
+            rows.append(
+                "<tr>"
+                f"<td class='{severity_class}'>{html.escape(finding.threat_level.upper())}</td>"
+                f"<td>{html.escape(finding.file_path)}</td>"
+                f"<td>{finding.line_number}</td>"
+                f"<td>{html.escape(finding.signature_id)}</td>"
+                f"<td>{html.escape(finding.signature_name)}</td>"
+                f"<td>{html.escape(finding.category)}</td>"
+                f"<td>{html.escape(finding.description)}</td>"
+                f"<td>{html.escape(finding.remediation)}</td>"
+                "</tr>"
+            )
+
+        findings_table = "\n".join(rows) if rows else "<tr><td colspan='8'>No threats detected.</td></tr>"
+        return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WordPress Malware Scan Report</title>
+  <style>
+    body {{ font-family: ui-monospace, Menlo, Consolas, monospace; background:#111; color:#eee; margin:0; padding:20px; }}
+    h1, h2 {{ margin: 0 0 12px 0; }}
+    .meta, .summary {{ margin-bottom: 20px; padding: 12px; border:1px solid #333; background:#181818; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+    th, td {{ border: 1px solid #333; padding: 8px; text-align: left; vertical-align: top; }}
+    th {{ background:#222; }}
+    .sev-critical {{ color:#ff4d4f; font-weight:700; }}
+    .sev-high {{ color:#ff9f1a; font-weight:700; }}
+    .sev-medium {{ color:#ffd166; font-weight:700; }}
+    .sev-low {{ color:#66d9ef; font-weight:700; }}
+  </style>
+</head>
+<body>
+  <h1>WordPress Malware Scan Report</h1>
+  <div class="meta">
+    <div><strong>Generated:</strong> {html.escape(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}</div>
+    <div><strong>Duration:</strong> {stats.scan_duration_seconds:.2f} seconds</div>
+  </div>
+  <div class="summary">
+    <h2>Summary</h2>
+    <div>Files Scanned: {stats.scanned_files}</div>
+    <div>Infected Files: {stats.infected_files}</div>
+    <div>Total Findings: {stats.total_findings}</div>
+    <div>Critical: {stats.critical} | High: {stats.high} | Medium: {stats.medium} | Low: {stats.low}</div>
+  </div>
+  <h2>Findings</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Severity</th><th>File</th><th>Line</th><th>Signature ID</th>
+        <th>Threat</th><th>Category</th><th>Description</th><th>Remediation</th>
+      </tr>
+    </thead>
+    <tbody>
+      {findings_table}
+    </tbody>
+  </table>
+</body>
+</html>"""
+
+    @staticmethod
+    def generate_text_report(results: List[ScanResult], stats: ScanStats) -> str:
+        lines = []
+        lines.append("=" * 70)
+        lines.append("WORDPRESS MALWARE SCAN REPORT")
+        lines.append("=" * 70)
+        lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append(f"Duration: {stats.scan_duration_seconds:.2f} seconds")
+        lines.append("")
+        lines.append("SUMMARY")
+        lines.append("-" * 70)
+        lines.append(f"Files Scanned: {stats.scanned_files}")
+        lines.append(f"Infected Files: {stats.infected_files}")
+        lines.append(f"Total Findings: {stats.total_findings}")
+        lines.append(f"  Critical: {stats.critical} | High: {stats.high} | Medium: {stats.medium} | Low: {stats.low}")
+        lines.append("")
+        
+        all_findings = ReportGenerator.findings_sorted(results)
+        
+        if all_findings:
+            lines.append("FINDINGS")
+            lines.append("-" * 70)
+            
+            for finding in all_findings:
+                lines.append(f"[{finding.threat_level.upper()}] in {finding.file_path}:{finding.line_number}")
+                lines.append(f"  -> {finding.signature_name}: {finding.description}")
+                lines.append("")
+        else:
+            lines.append("No threats detected! ✓")
+        
+        lines.append("=" * 70)
+        return '\n'.join(lines)
+
+
+def _resolve_report_output_path(raw_path: str, extension: str, stem_prefix: str) -> Path:
+    target = Path(raw_path)
+    if target.is_dir() or raw_path.endswith(("/", "\\")):
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        return target / f"{stem_prefix}-{timestamp}.{extension}"
+    return target
+
+
+def _collect_infected_paths(results: List[ScanResult]) -> List[Path]:
+    infected = sorted({Path(r.file_path) for r in results if r.findings})
+    return infected
+
+
+def _confirm_remediation(action: str, count: int, non_interactive_yes: bool) -> bool:
+    if non_interactive_yes:
+        return True
+    reply = input(f"{action} {count} infected files? Type 'yes' to continue: ").strip().lower()
+    return reply == "yes"
+
+
+def _apply_quarantine(paths: List[Path], quarantine_dir: Path) -> Tuple[int, int]:
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+    moved = 0
+    failed = 0
+    for src in paths:
+        try:
+            dst = quarantine_dir / src.name
+            if dst.exists():
+                stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+                dst = quarantine_dir / f"{src.stem}-{stamp}{src.suffix}"
+            shutil.move(str(src), str(dst))
+            moved += 1
+        except Exception:
+            failed += 1
+    return moved, failed
+
+
+def _apply_delete(paths: List[Path]) -> Tuple[int, int]:
+    deleted = 0
+    failed = 0
+    for src in paths:
+        try:
+            src.unlink(missing_ok=False)
+            deleted += 1
+        except Exception:
+            failed += 1
+    return deleted, failed
+
+
+def _append_audit_log(
+    log_path: Path,
+    *,
+    mode: str,
+    action: str,
+    target: str,
+    result: str,
+    details: Optional[Dict] = None,
+) -> None:
+    record = {
+        "timestamp": datetime.now().isoformat(),
+        "user": getpass.getuser(),
+        "mode": mode,
+        "action": action,
+        "target": target,
+        "result": result,
+        "details": details or {},
+    }
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    mins, secs = divmod(seconds, 60)
+    hours, mins = divmod(mins, 60)
+    if hours:
+        return f"{hours:02d}:{mins:02d}:{secs:02d}"
+    return f"{mins:02d}:{secs:02d}"
+        
+# =============================================================================
+# TUI IMPLEMENTATION
+# =============================================================================
+if TEXTUAL_AVAILABLE:
+    class ConfirmActionScreen(ModalScreen):
+        BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+        def __init__(self, action_label: str, target_path: str):
+            super().__init__()
+            self.action_label = action_label
+            self.target_path = target_path
+
+        def compose(self) -> ComposeResult:
+            with Container(id="detail-container", classes="popup"):
+                yield Label(f"[b]{self.action_label}[/b]")
+                yield Label(f"Target file:\n{self.target_path}", classes="wrap")
+                with Horizontal():
+                    yield Button("Confirm", id="confirm-action", variant="error")
+                    yield Button("Cancel", id="cancel-action")
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "confirm-action":
+                self.dismiss(True)
+            else:
+                self.dismiss(False)
+
+        def action_cancel(self) -> None:
+            self.dismiss(False)
+
+    class FindingDetailScreen(ModalScreen):
+        BINDINGS = [Binding("escape", "dismiss", "Close")]
+        def __init__(self, finding: Finding):
+            super().__init__()
+            self.finding = finding
+
+        def _render_context(self) -> str:
+            blocks: List[str] = []
+            try:
+                lines = Path(self.finding.file_path).read_text(encoding="utf-8", errors="ignore").splitlines()
+                if lines:
+                    start = max(1, self.finding.line_number - 3)
+                    end = min(len(lines), self.finding.line_number + 3)
+                    for line_no in range(start, end + 1):
+                        marker = ">>" if line_no == self.finding.line_number else "  "
+                        source = lines[line_no - 1].replace("\x00", "")
+                        blocks.append(f"{marker} {line_no:>6} | {source}")
+            except Exception:
+                blocks = []
+
+            if not blocks:
+                before_lines = self.finding.context_before.splitlines() if self.finding.context_before else []
+                after_lines = self.finding.context_after.splitlines() if self.finding.context_after else []
+                start_line = max(1, self.finding.line_number - len(before_lines))
+                for idx, line in enumerate(before_lines):
+                    line_no = start_line + idx
+                    blocks.append(f"   {line_no:>6} | {line.replace(chr(0), '')}")
+                blocks.append(f">> {self.finding.line_number:>6} | {self.finding.matched_content.strip()[:220].replace(chr(0), '')}")
+                for idx, line in enumerate(after_lines, start=1):
+                    blocks.append(f"   {self.finding.line_number + idx:>6} | {line.replace(chr(0), '')}")
+
+            if not blocks:
+                blocks.append(f">> {self.finding.line_number:>6} | {self.finding.matched_content.strip()[:220]}")
+            return "\n".join(blocks)
+
+        def _raw_context_source(self) -> tuple[str, int, int]:
+            """Return raw source context, local highlight line, and file start line."""
+            try:
+                lines = Path(self.finding.file_path).read_text(encoding="utf-8", errors="ignore").splitlines()
+                if lines:
+                    start = max(1, self.finding.line_number - 3)
+                    end = min(len(lines), self.finding.line_number + 3)
+                    snippet = "\n".join(lines[start - 1:end]).replace("\x00", "")
+                    highlight_line = self.finding.line_number - start + 1
+                    return snippet, max(1, highlight_line), start
+            except Exception:
+                pass
+            return self.finding.matched_content.strip()[:220], 1, self.finding.line_number
+
+        def compose(self) -> ComposeResult:
+            with Container(id="detail-container", classes="popup"):
+                sev_style = SEVERITY_STYLES.get(self.finding.threat_level, "white")
+                yield Label(f"[{sev_style}]● {self.finding.threat_level.upper()}[/]  {self.finding.signature_name}")
+                yield Label(f"[b]File:[/b] {self.finding.file_path}:{self.finding.line_number}")
+                yield Label(f"[b]Signature ID:[/b] {self.finding.signature_id}    [b]Category:[/b] {self.finding.category}")
+                yield Label("[b]Code Context[/b]")
+                yield Static(self._render_code_panel(), classes="code-view")
+                yield Label(f"[b]What it means:[/b] {self.finding.description}", classes="wrap")
+                yield Label(f"[b]How to remove:[/b] {self.finding.remediation}", classes="wrap")
+
+        def _language_for_file(self) -> str:
+            ext = Path(self.finding.file_path).suffix.lower()
+            lexer = "php"
+            if ext in {".js"}:
+                lexer = "javascript"
+            elif ext in {".css"}:
+                lexer = "css"
+            elif ext in {".html", ".htm"}:
+                lexer = "html"
+            elif ext in {".json"}:
+                lexer = "json"
+            elif ext in {".xml"}:
+                lexer = "xml"
+            return lexer
+
+        def _guess_lexer(self, code: str) -> str:
+            filename = Path(self.finding.file_path).name
+            if find_lexer_class is not None:
+                try:
+                    lexer_cls = find_lexer_class("JavascriptPhpLexer")
+                    if lexer_cls is not None:
+                        lexer = lexer_cls()
+                        aliases = getattr(lexer, "aliases", None)
+                        if aliases:
+                            return aliases[0]
+                except Exception:
+                    pass
+            if get_lexer_by_name is not None:
+                for candidate in ("js+php", "javascript+php", "html+php"):
+                    try:
+                        lexer = get_lexer_by_name(candidate)
+                        aliases = getattr(lexer, "aliases", None)
+                        if aliases:
+                            return aliases[0]
+                    except Exception:
+                        continue
+            # Prefer php for .php/.phtml files.
+            if filename.lower().endswith((".php", ".phtml", ".php5", ".php7", ".inc")):
+                return "php"
+            if guess_lexer_for_filename is not None:
+                try:
+                    guessed = guess_lexer_for_filename(filename, code)
+                    if getattr(guessed, "aliases", None):
+                        return guessed.aliases[0]
+                except Exception:
+                    pass
+            return self._language_for_file()
+
+        def _render_syntax(self):
+            context, highlight_line, start_line = self._raw_context_source()
+            lexer = self._guess_lexer(context)
+            return Syntax(
+                context,
+                lexer=lexer,
+                theme="monokai",
+                line_numbers=True,
+                start_line=start_line,
+                word_wrap=False,
+                indent_guides=True,
+                highlight_lines={highlight_line},
+            )
+
+        def _render_code_panel(self):
+            return Panel(self._render_syntax(), title=Path(self.finding.file_path).name)
+
+    class ScannerTUI(App):
+        LOGO = """██╗    ██╗██████╗       ███████╗ ██████╗ █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗
+██║    ██║██╔══██╗      ██╔════╝██╔════╝██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗
+██║ █╗ ██║██████╔╝█████╗███████╗██║     ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝
+██║███╗██║██╔═══╝ ╚════╝╚════██║██║     ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗
+╚███╔███╔╝██║           ███████║╚██████╗██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║
+ ╚══╝╚══╝ ╚═╝           ╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝"""
+        BINDINGS = [
+            ("q", "quit", "Quit"),
+            ("d", "show_detail", "Details"),
+            ("enter", "show_detail", "Details"),
+            ("p", "toggle_pause", "Pause"),
+            ("s", "toggle_sort", "Sort"),
+            ("j", "cursor_down", "Down"),
+            ("k", "cursor_up", "Up"),
+            ("r", "stop_restart", "Stop/Restart"),
+            ("e", "export_results", "Export"),
+            ("x", "quarantine_selected", "Quarantine"),
+            ("delete", "delete_selected", "Delete"),
+        ]
+        CSS = """
+        #main-container { padding: 1; height: 1fr; }
+        #top-row { height: 9; margin: 0; }
+        #left-panel { width: 1fr; }
+        #logo-panel {
+            width: 96;
+            padding: 0 1;
+        }
+        #logo {
+            color: #ff4d4f;
+            text-style: bold;
+        }
+        #stats-grid { height: 1; }
+        #found-grid { height: 1; margin: 0; }
+        #found-label { width: 8; }
+        #filter-row { height: 3; margin: 0; }
+        #filter-row Button { min-width: 10; margin-right: 1; }
+        #action-row { height: 3; margin: 0; }
+        #action-row Button { min-width: 12; margin-right: 1; }
+        #scan-state { color: #7f8c8d; margin: 0; }
+        #sort-help { color: #7f8c8d; margin: 0 0 1 0; }
+        #findings-table { height: 1fr; min-height: 8; }
+        #detail-container {
+            width: 90%;
+            height: 90%;
+            border: heavy #3d4754;
+            background: #0f141a;
+            padding: 1 2;
+        }
+        .code-view {
+            border: round #334;
+            background: #151a23;
+            padding: 1;
+            height: 14;
+        }
+        .wrap { text-wrap: wrap; }
+        """
+
+        total_files = reactive(0)
+        files_scanned = reactive(0)
+        critical_count = reactive(0)
+        high_count = reactive(0)
+        medium_count = reactive(0)
+        low_count = reactive(0)
+        sort_label = reactive("severity")
+        
+        def __init__(self, scanner: FileScanner, scan_path: str, threads: int, audit_log_path: str = "wp-scan-remediation-audit.jsonl"):
+            super().__init__()
+            self.scanner = scanner
+            self.scan_path = scan_path
+            self.threads = threads
+            self.audit_log_path = Path(audit_log_path)
+            self.findings_map: Dict[str, Finding] = {}
+            self.finding_rows: List[Tuple[str, Finding]] = []
+            self.visible_rows: List[Tuple[str, Finding]] = []
+            self.scan_complete = False
+            self.scan_running = False
+            self.executor: Optional[ThreadPoolExecutor] = None
+            self.scan_worker = None
+            self._paused = False
+            self._stopping = False
+            self._sort_columns = ["severity", "file", "threat"]
+            self._sort_index = 0
+            self._sorting_active = False
+            self._severity_filters = ["all", "critical", "high", "medium", "low"]
+            self._severity_filter_index = 0
+
+        def compose(self) -> ComposeResult:
+            yield Header()
+            with Container(id="main-container"):
+                with Horizontal(id="top-row"):
+                    with Container(id="left-panel"):
+                        with Horizontal(id="stats-grid"):
+                            yield Label("Files: 0/0", id="files-stat")
+                        with Horizontal(id="found-grid"):
+                            yield Label("Found:", id="found-label")
+                            yield Label("[#ff4d4f]Critical: 0  [/]", id="critical-stat")
+                            yield Label("[#ff9f1a]High: 0  [/]", id="high-stat")
+                            yield Label("[#ffd166]Medium: 0  [/]", id="medium-stat")
+                            yield Label("[#66d9ef]Low: 0[/]", id="low-stat")
+                        with Horizontal(id="filter-row"):
+                            yield Button("All", id="filter-all")
+                            yield Button("Critical", id="filter-critical")
+                            yield Button("High", id="filter-high")
+                            yield Button("Medium", id="filter-medium")
+                            yield Button("Low", id="filter-low")
+                        with Horizontal(id="action-row"):
+                            yield Button("Rescan", id="action-rescan")
+                            yield Button("Export", id="action-export")
+                            yield Button("Quarantine Selected", id="action-quarantine")
+                            yield Button("Delete Selected", id="action-delete")
+                    with Container(id="logo-panel"):
+                        yield Static(Text(self.LOGO, no_wrap=True, overflow="crop"), id="logo")
+                yield Static("Status: RUNNING", id="scan-state")
+                yield ProgressBar(total=100, id="progress-bar")
+                yield DataTable(id="findings-table")
+                yield Static("Sort/Details/Export are enabled after scan completes", id="sort-help")
+            yield Footer()
+
+        def on_mount(self) -> None:
+            table = self.query_one(DataTable)
+            table.add_columns("Level", "File", "Threat", "Line")
+            table.cursor_type = "row"
+            table.focus()
+            self._start_scan()
+
+        def _reset_scan_state(self) -> None:
+            self.findings_map.clear()
+            self.finding_rows.clear()
+            self.visible_rows.clear()
+            self.total_files = 0
+            self.files_scanned = 0
+            self.critical_count = 0
+            self.high_count = 0
+            self.medium_count = 0
+            self.low_count = 0
+            self._paused = False
+            self._stopping = False
+            self._sorting_active = False
+            self._sort_index = -1
+            self._severity_filter_index = 0
+            self.query_one(DataTable).clear()
+            self.query_one(ProgressBar).update(progress=0)
+            self.query_one("#sort-help", Static).update("Sort/Details/Export are enabled after scan completes")
+            self._update_pause_state()
+            self._refresh_filter_buttons()
+
+        def _start_scan(self) -> None:
+            self._reset_scan_state()
+            self.scan_complete = False
+            self.scan_running = True
+            self.executor = ThreadPoolExecutor(max_workers=self.threads)
+            self.sub_title = "Starting scan..."
+            self._update_pause_state()
+            self.scan_worker = self.run_worker(self._run_scan)
+
+        def _stop_scan(self) -> None:
+            self._stopping = True
+            self.scan_running = False
+            self._paused = False
+            self._update_pause_state()
+            if self.executor:
+                self.executor.shutdown(wait=False, cancel_futures=True)
+                self.executor = None
+
+        def _severity_markup(self, finding: Finding) -> str:
+            color = SEVERITY_STYLES.get(finding.threat_level, "white")
+            return f"[{color}]{finding.threat_level.upper()}[/]"
+
+        def _sort_key(self, item: Tuple[str, Finding]) -> Tuple:
+            _, finding = item
+            key = self._sort_columns[self._sort_index]
+            if key == "severity":
+                return (SEVERITY_RANK.get(finding.threat_level, 99), finding.file_path, finding.line_number)
+            if key == "file":
+                return (finding.file_path.lower(), SEVERITY_RANK.get(finding.threat_level, 99), finding.line_number)
+            if key == "threat":
+                return (finding.signature_name.lower(), finding.file_path.lower(), finding.line_number)
+            return (finding.line_number, finding.file_path.lower(), SEVERITY_RANK.get(finding.threat_level, 99))
+
+        def _refresh_table(self) -> None:
+            table = self.query_one(DataTable)
+            table.clear()
+            rows = list(self.finding_rows)
+            if self._sorting_active:
+                rows.sort(key=self._sort_key)
+            selected_filter = self._severity_filters[self._severity_filter_index]
+            if selected_filter != "all":
+                rows = [(k, f) for k, f in rows if f.threat_level == selected_filter]
+            self.visible_rows = rows
+            for key, finding in self.visible_rows:
+                table.add_row(
+                    self._severity_markup(finding),
+                    Path(finding.file_path).name,
+                    finding.signature_name,
+                    str(finding.line_number),
+                    key=key,
+                )
+            if table.row_count > 0:
+                table.cursor_coordinate = (0, 0)
+
+        def _set_filter(self, filter_name: str) -> None:
+            if filter_name not in self._severity_filters:
+                return
+            self._severity_filter_index = self._severity_filters.index(filter_name)
+            self._refresh_filter_buttons()
+            sort_name = self._sort_columns[self._sort_index] if self._sorting_active else "append-order"
+            self.query_one("#sort-help", Static).update(f"Sort: {sort_name} | Filter: {filter_name} (s=sort, d/enter=details, e=export)")
+            self._refresh_table()
+
+        def _refresh_filter_buttons(self) -> None:
+            selected = self._severity_filters[self._severity_filter_index]
+            for filter_name in self._severity_filters:
+                btn = self.query_one(f"#filter-{filter_name}", Button)
+                if filter_name == selected:
+                    btn.label = f"[b]{filter_name.capitalize()}[/b]"
+                    btn.variant = "primary"
+                else:
+                    btn.label = filter_name.capitalize()
+                    btn.variant = "default"
+
+        def _append_finding_row(self, key: str, finding: Finding) -> None:
+            if self._severity_filters[self._severity_filter_index] != "all":
+                return
+            self.visible_rows.append((key, finding))
+            table = self.query_one(DataTable)
+            table.add_row(
+                self._severity_markup(finding),
+                Path(finding.file_path).name,
+                finding.signature_name,
+                str(finding.line_number),
+                key=key,
+            )
+
+        async def _run_scan(self) -> None:
+            loop = asyncio.get_running_loop()
+            self.sub_title = "Collecting files..."
+            if not self.executor:
+                return
+            files = await loop.run_in_executor(self.executor, self.scanner.collect_files, Path(self.scan_path))
+            self.total_files = len(files)
+            if not files:
+                self.sub_title = "✓ No files to scan."
+                self.scan_running = False
+                self.scan_complete = True
+                return
+
+            self.sub_title = "Scanning..."
+            pending: set[asyncio.Future] = set()
+            for file_path in files:
+                if not self.executor:
+                    break
+                future = loop.run_in_executor(self.executor, self.scanner.scan_file, file_path)
+                pending.add(future)
+            while pending and not self._stopping:
+                while self._paused and not self._stopping:
+                    self.sub_title = "⏸ PAUSED"
+                    await asyncio.sleep(0.1)
+                if self._stopping:
+                    break
+                self.sub_title = "Scanning..."
+
+                done, pending = await asyncio.wait(
+                    pending,
+                    timeout=0.1,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    continue
+
+                for future in done:
+                    result: ScanResult = future.result()
+                    self.files_scanned += 1
+
+                    if result.findings:
+                        for finding in result.findings:
+                            key = f"f_{len(self.findings_map)}"
+                            self.findings_map[key] = finding
+                            self.finding_rows.append((key, finding))
+                            if finding.threat_level == 'critical': self.critical_count += 1
+                            elif finding.threat_level == 'high': self.high_count += 1
+                            elif finding.threat_level == 'medium': self.medium_count += 1
+                            else: self.low_count += 1
+                            if not self._sorting_active:
+                                self._append_finding_row(key, finding)
+                        if self._sorting_active:
+                            self._refresh_table()
+                await asyncio.sleep(0)
+
+            if self._stopping:
+                for task in pending:
+                    task.cancel()
+                self.sub_title = "■ Scan stopped"
+            else:
+                self.scan_complete = True
+                self.sub_title = "✓ Scan Complete"
+                self.query_one("#sort-help", Static).update("Sort: severity | Filter: all (s=sort, d/enter=details, e=export)")
+            self.scan_running = False
+            self._update_pause_state()
+            if self.executor:
+                self.executor.shutdown(wait=False, cancel_futures=True)
+                self.executor = None
+        
+        def watch_files_scanned(self, val:int): 
+            self.query_one("#files-stat").update(f"Files: {val}/{self.total_files}")
+            if self.total_files > 0:
+                self.query_one(ProgressBar).update(progress=val / self.total_files * 100)
+        def watch_critical_count(self, val:int): self.query_one("#critical-stat").update(f"[#ff4d4f]Critical: {val}  [/]")
+        def watch_high_count(self, val:int): self.query_one("#high-stat").update(f"[#ff9f1a]High: {val}  [/]")
+        def watch_medium_count(self, val:int): self.query_one("#medium-stat").update(f"[#ffd166]Medium: {val}  [/]")
+        def watch_low_count(self, val:int): self.query_one("#low-stat").update(f"[#66d9ef]Low: {val}[/]")
+        def _update_pause_state(self) -> None:
+            if self.scan_running and self._paused:
+                state, color = "PAUSED", "yellow"
+            elif self.scan_running:
+                state, color = "RUNNING", "green"
+            elif self.scan_complete:
+                state, color = "COMPLETE", "cyan"
+            else:
+                state, color = "STOPPED", "red"
+            self.query_one("#scan-state", Static).update(f"Status: [{color}]{state}[/]")
+
+        def action_quit(self) -> None:
+            self._stop_scan()
+            self.exit()
+        def action_toggle_pause(self) -> None:
+            if not self.scan_running:
+                self.bell()
+                return
+            self._paused = not self._paused
+            self._update_pause_state()
+        def action_stop_restart(self) -> None:
+            if self.scan_running:
+                self._stop_scan()
+                self.query_one("#sort-help", Static).update("Scan stopped (press r to restart)")
+            else:
+                self._start_scan()
+                self._update_pause_state()
+        def action_cursor_down(self) -> None:
+            self.query_one(DataTable).action_cursor_down()
+        def action_cursor_up(self) -> None:
+            self.query_one(DataTable).action_cursor_up()
+        def action_toggle_sort(self) -> None:
+            if not self.scan_complete:
+                self.bell()
+                return
+            if not self.finding_rows:
+                self.bell()
+                return
+            self._sorting_active = True
+            self._sort_index = (self._sort_index + 1) % len(self._sort_columns)
+            self.sort_label = self._sort_columns[self._sort_index]
+            filter_name = self._severity_filters[self._severity_filter_index]
+            self.query_one("#sort-help", Static).update(f"Sort: {self.sort_label} | Filter: {filter_name} (s=sort, d/enter=details, e=export)")
+            self._refresh_table()
+
+        def action_export_results(self) -> None:
+            if not self.scan_complete:
+                self.bell()
+                return
+            if not self.finding_rows:
+                self.query_one("#sort-help", Static).update("No findings to export")
+                self.bell()
+                return
+
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            json_path = Path(f"wp-scan-findings-{timestamp}.json")
+            csv_path = Path(f"wp-scan-findings-{timestamp}.csv")
+
+            rows = []
+            for _, finding in self.finding_rows:
+                rows.append(
+                    {
+                        "file_path": finding.file_path,
+                        "line_number": finding.line_number,
+                        "signature_id": finding.signature_id,
+                        "signature_name": finding.signature_name,
+                        "threat_level": finding.threat_level,
+                        "category": finding.category,
+                        "matched_content": finding.matched_content,
+                        "description": finding.description,
+                        "remediation": finding.remediation,
+                        "timestamp": finding.timestamp,
+                    }
+                )
+
+            with open(json_path, "w", encoding="utf-8") as jf:
+                json.dump(rows, jf, indent=2)
+
+            with open(csv_path, "w", encoding="utf-8", newline="") as cf:
+                writer = csv.DictWriter(cf, fieldnames=list(rows[0].keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+
+            self.query_one("#sort-help", Static).update(
+                f"Exported: {json_path.name}, {csv_path.name}"
+            )
+
+        def _selected_finding(self) -> Optional[Finding]:
+            table = self.query_one(DataTable)
+            if table.row_count == 0:
+                return None
+            row_index = table.cursor_coordinate.row
+            if row_index < 0 or row_index >= len(self.visible_rows):
+                return None
+            _, finding = self.visible_rows[row_index]
+            return finding
+
+        def _drop_file_findings(self, file_path: str) -> None:
+            self.finding_rows = [(k, f) for k, f in self.finding_rows if f.file_path != file_path]
+            self.visible_rows = [(k, f) for k, f in self.visible_rows if f.file_path != file_path]
+            self.findings_map = {k: f for k, f in self.findings_map.items() if f.file_path != file_path}
+            self._refresh_table()
+
+        def _confirm_and_run(self, action: str, finding: Finding) -> None:
+            label = "Quarantine selected file?" if action == "quarantine" else "Delete selected file?"
+
+            def _after(confirm: bool) -> None:
+                if not confirm:
+                    self.query_one("#sort-help", Static).update(f"{action.capitalize()} cancelled")
+                    return
+                src = Path(finding.file_path)
+                if not src.exists():
+                    self.query_one("#sort-help", Static).update("Target file no longer exists")
+                    self.bell()
+                    return
+                if action == "quarantine":
+                    moved, failed = _apply_quarantine([src], Path("quarantine"))
+                    self.query_one("#sort-help", Static).update(f"Quarantine complete: moved={moved}, failed={failed}")
+                    _append_audit_log(
+                        self.audit_log_path,
+                        mode="tui",
+                        action="quarantine",
+                        target=finding.file_path,
+                        result="success" if moved else "failed",
+                        details={"moved": moved, "failed": failed},
+                    )
+                    if moved:
+                        self._drop_file_findings(finding.file_path)
+                else:
+                    deleted, failed = _apply_delete([src])
+                    self.query_one("#sort-help", Static).update(f"Delete complete: deleted={deleted}, failed={failed}")
+                    _append_audit_log(
+                        self.audit_log_path,
+                        mode="tui",
+                        action="delete",
+                        target=finding.file_path,
+                        result="success" if deleted else "failed",
+                        details={"deleted": deleted, "failed": failed},
+                    )
+                    if deleted:
+                        self._drop_file_findings(finding.file_path)
+
+            self.push_screen(ConfirmActionScreen(label, finding.file_path), _after)
+
+        def action_quarantine_selected(self) -> None:
+            if not self.scan_complete:
+                self.bell()
+                return
+            finding = self._selected_finding()
+            if not finding:
+                self.bell()
+                return
+            self._confirm_and_run("quarantine", finding)
+
+        def action_delete_selected(self) -> None:
+            if not self.scan_complete:
+                self.bell()
+                return
+            finding = self._selected_finding()
+            if not finding:
+                self.bell()
+                return
+            self._confirm_and_run("delete", finding)
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            button_id = event.button.id or ""
+            if button_id == "action-rescan":
+                self.action_stop_restart()
+                return
+            if button_id == "action-export":
+                self.action_export_results()
+                return
+            if button_id == "action-quarantine":
+                self.action_quarantine_selected()
+                return
+            if button_id == "action-delete":
+                self.action_delete_selected()
+                return
+            if not button_id.startswith("filter-"):
+                return
+            if not self.scan_complete:
+                self.bell()
+                return
+            filter_name = button_id.replace("filter-", "", 1)
+            self._set_filter(filter_name)
+
+        def action_show_detail(self) -> None:
+            if not self.scan_complete:
+                self.bell()
+                return
+            table = self.query_one(DataTable)
+            if table.row_count == 0:
+                self.bell()
+                return
+            try:
+                row_index = table.cursor_coordinate.row
+                if row_index < 0:
+                    self.bell()
+                    return
+                if row_index >= len(self.visible_rows):
+                    self.bell()
+                    return
+                _, finding = self.visible_rows[row_index]
+                self.push_screen(FindingDetailScreen(finding))
+            except Exception:
+                self.bell()
+
+        def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+            if not self.scan_complete:
+                return
+            row_index = event.cursor_row
+            if row_index < 0 or row_index >= len(self.visible_rows):
+                return
+            _, finding = self.visible_rows[row_index]
+            self.push_screen(FindingDetailScreen(finding))
+
+# =============================================================================
+# MAIN
+# =============================================================================
+def main():
+    parser = argparse.ArgumentParser(description="WordPress Malware Scanner")
+    parser.add_argument('path', nargs='?', default='.', help='Path to scan')
+
+    general = parser.add_argument_group("General Options")
+    general.add_argument('--threads', type=int, default=os.cpu_count(), help='Number of threads')
+    general.add_argument('--signatures', default='', help='Path to custom JSON signatures file')
+
+    tui_group = parser.add_argument_group("TUI Mode Options")
+    tui_group.add_argument('--no-tui', action='store_true', help='Disable TUI and run headless scan')
+
+    headless_report = parser.add_argument_group("Headless Reporting Options (--no-tui)")
+    headless_report.add_argument('--report-json', default='', help='Write JSON report to this file path')
+    headless_report.add_argument('--report-html', default='', help='Write HTML report to this file path')
+
+    remediation = parser.add_argument_group("Headless Remediation Options (--no-tui)")
+    remediation.add_argument('--quarantine', action='store_true', help='Move infected files to quarantine directory after scan')
+    remediation.add_argument('--quarantine-dir', default='quarantine', help='Quarantine directory path used with --quarantine')
+    remediation.add_argument('--delete', action='store_true', help='Delete infected files after scan')
+    remediation.add_argument('--yes', action='store_true', help='Skip remediation confirmation prompt for --quarantine/--delete')
+    remediation.add_argument('--audit-log', default='wp-scan-remediation-audit.jsonl', help='Append remediation audit log to this JSONL file')
+    args = parser.parse_args()
+    if args.quarantine and args.delete:
+        parser.error("--quarantine and --delete are mutually exclusive")
+
+    sig_manager = SignatureManager(custom_signature_file=args.signatures or None)
+    sig_manager.load_builtin()
+    if args.signatures:
+        loaded_custom = sig_manager.load_custom()
+        print(f"Loaded {loaded_custom} custom signatures from {args.signatures}")
+    scanner = FileScanner(sig_manager.get_all())
+
+    if args.no_tui or not TEXTUAL_AVAILABLE:
+        if not TEXTUAL_AVAILABLE and not args.no_tui:
+            reason = TEXTUAL_IMPORT_ERROR or "missing TUI dependencies"
+            print(
+                f"TUI unavailable ({reason}). Falling back to headless mode.\n"
+                "Install TUI dependencies with: pip install 'wp-scanner[tui]'"
+            )
+        
+        print(f"Scanning {args.path}...")
+        start_time = time.time()
+        stats = ScanStats()
+        results = []
+        
+        files = scanner.collect_files(Path(args.path))
+        stats.total_files = len(files)
+        
+        with ThreadPoolExecutor(max_workers=args.threads) as executor:
+            futures = {executor.submit(scanner.scan_file, f): f for f in files}
+            for i, future in enumerate(as_completed(futures)):
+                result = future.result()
+                results.append(result)
+                stats.scanned_files += 1
+                if result.findings:
+                    # A file is infected if it has one or more findings.
+                    # We use a set to keep track of infected file paths to avoid double counting.
+                    infected_paths = {r.file_path for r in results if r.findings}
+                    stats.infected_files = len(infected_paths)
+
+                    for finding in result.findings:
+                        if finding.threat_level == 'critical': stats.critical += 1
+                        elif finding.threat_level == 'high': stats.high += 1
+                        elif finding.threat_level == 'medium': stats.medium += 1
+                        else: stats.low += 1
+                
+                progress = (i + 1) / stats.total_files * 100 if stats.total_files > 0 else 0
+                elapsed = time.time() - start_time
+                processed = i + 1
+                rate = processed / elapsed if elapsed > 0 else 0
+                remaining = stats.total_files - processed
+                eta_seconds = (remaining / rate) if rate > 0 else 0
+                sys.stdout.write(
+                    f"\rScanning... {progress:.2f}% ({processed}/{stats.total_files}) "
+                    f"ETA: {_format_duration(eta_seconds)}"
+                )
+                sys.stdout.flush()
+        
+        end_time = time.time()
+        stats.scan_duration_seconds = end_time - start_time
+        stats.total_findings = stats.critical + stats.high + stats.medium + stats.low
+        print("\nScan complete.")
+        
+        report = ReportGenerator.generate_text_report(results, stats)
+        print(report)
+
+        if args.report_json:
+            json_report = ReportGenerator.generate_json_report(results, stats)
+            report_path = _resolve_report_output_path(
+                args.report_json,
+                extension="json",
+                stem_prefix="wp-scan-report",
+            )
+            report_path.write_text(json.dumps(json_report, indent=2), encoding="utf-8")
+            print(f"JSON report written: {report_path}")
+
+        if args.report_html:
+            html_report = ReportGenerator.generate_html_report(results, stats)
+            report_path = _resolve_report_output_path(
+                args.report_html,
+                extension="html",
+                stem_prefix="wp-scan-report",
+            )
+            report_path.write_text(html_report, encoding="utf-8")
+            print(f"HTML report written: {report_path}")
+
+        infected_paths = _collect_infected_paths(results)
+        if args.quarantine and infected_paths:
+            if _confirm_remediation("Quarantine", len(infected_paths), args.yes):
+                moved, failed = _apply_quarantine(infected_paths, Path(args.quarantine_dir))
+                print(f"Quarantine complete: moved={moved}, failed={failed}, dir={Path(args.quarantine_dir)}")
+                for path in infected_paths:
+                    _append_audit_log(
+                        Path(args.audit_log),
+                        mode="headless",
+                        action="quarantine",
+                        target=str(path),
+                        result="success" if moved > 0 and failed == 0 else "partial" if moved > 0 else "failed",
+                        details={"quarantine_dir": str(Path(args.quarantine_dir)), "moved": moved, "failed": failed},
+                    )
+            else:
+                print("Quarantine cancelled.")
+                _append_audit_log(
+                    Path(args.audit_log),
+                    mode="headless",
+                    action="quarantine",
+                    target="*",
+                    result="cancelled",
+                    details={"requested_files": len(infected_paths)},
+                )
+        elif args.delete and infected_paths:
+            if _confirm_remediation("Delete", len(infected_paths), args.yes):
+                deleted, failed = _apply_delete(infected_paths)
+                print(f"Delete complete: deleted={deleted}, failed={failed}")
+                for path in infected_paths:
+                    _append_audit_log(
+                        Path(args.audit_log),
+                        mode="headless",
+                        action="delete",
+                        target=str(path),
+                        result="success" if deleted > 0 and failed == 0 else "partial" if deleted > 0 else "failed",
+                        details={"deleted": deleted, "failed": failed},
+                    )
+            else:
+                print("Delete cancelled.")
+                _append_audit_log(
+                    Path(args.audit_log),
+                    mode="headless",
+                    action="delete",
+                    target="*",
+                    result="cancelled",
+                    details={"requested_files": len(infected_paths)},
+                )
+        elif (args.quarantine or args.delete) and not infected_paths:
+            print("No infected files to remediate.")
+            _append_audit_log(
+                Path(args.audit_log),
+                mode="headless",
+                action="quarantine" if args.quarantine else "delete",
+                target="*",
+                result="no-op",
+                details={"reason": "no infected files"},
+            )
+
+    else:
+        if args.report_json or args.report_html:
+            print(
+                "Note: --report-json/--report-html are only written in headless mode. "
+                "Use --no-tui, or export from TUI with the Export button / 'e'."
+            )
+        if args.quarantine or args.delete:
+            print("Note: --quarantine/--delete are only available in headless mode (--no-tui).")
+        app = ScannerTUI(scanner=scanner, scan_path=args.path, threads=args.threads, audit_log_path=args.audit_log)
+        app.run()
+
+if __name__ == '__main__':
+    main()
