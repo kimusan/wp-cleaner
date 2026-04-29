@@ -193,6 +193,30 @@ class CliIntegrationTests(unittest.TestCase):
             self.assertTrue(audit.exists())
             self.assertIn("\"action\": \"delete\"", audit.read_text(encoding="utf-8"))
 
+    def test_headless_cli_verify_core_offline_graceful(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "clean.php"
+            target.write_text("<?php echo 'ok';", encoding="utf-8")
+
+            proc = subprocess.run(
+                [
+                    "python3",
+                    "wp-scanner.py",
+                    str(root),
+                    "--no-tui",
+                    "--threads",
+                    "1",
+                    "--verify-core",
+                    "--verify-core-offline",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("Core baseline skipped:", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

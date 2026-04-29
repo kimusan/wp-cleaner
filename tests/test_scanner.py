@@ -4,7 +4,7 @@ import os
 import json
 from pathlib import Path
 
-from wp_scanner import FileScanner, SignatureManager, ScanStatus
+from wp_scanner import FileScanner, SignatureManager, ScanStatus, WordPressCoreVerifier
 
 
 class ScannerTests(unittest.TestCase):
@@ -139,6 +139,39 @@ class ScannerTests(unittest.TestCase):
             result = self.scanner.scan_file(target)
             heuristic_ids = {f.signature_id for f in result.findings}
             self.assertIn("H004", heuristic_ids)
+
+    def test_verify_core_filters_identical_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scan_root = root / "scan"
+            ref_root = root / ".wp-scanner-cache" / "wordpress-core" / "6.5.3" / "wordpress"
+            (scan_root / "wp-includes").mkdir(parents=True, exist_ok=True)
+            (ref_root / "wp-includes").mkdir(parents=True, exist_ok=True)
+
+            version_php = "<?php\n$wp_version = '6.5.3';\n"
+            core_php = "<?php echo 'core';\n"
+            changed_php = "<?php echo 'changed';\n"
+            plugin_php = "<?php echo 'plugin';\n"
+
+            (scan_root / "wp-includes" / "version.php").write_text(version_php, encoding="utf-8")
+            (ref_root / "wp-includes" / "version.php").write_text(version_php, encoding="utf-8")
+            (scan_root / "wp-includes" / "load.php").write_text(changed_php, encoding="utf-8")
+            (ref_root / "wp-includes" / "load.php").write_text(core_php, encoding="utf-8")
+            (scan_root / "wp-config.php").write_text("<?php\n", encoding="utf-8")
+            (ref_root / "wp-config.php").write_text("<?php\n", encoding="utf-8")
+            (scan_root / "wp-content" / "plugins").mkdir(parents=True, exist_ok=True)
+            (scan_root / "wp-content" / "plugins" / "x.php").write_text(plugin_php, encoding="utf-8")
+
+            verifier = WordPressCoreVerifier(cache_dir=root / ".wp-scanner-cache", offline=True)
+            ok, _msg = verifier.prepare(scan_root)
+            self.assertTrue(ok)
+
+            files = self.scanner.collect_files(scan_root)
+            filtered, skipped = verifier.filter_identical_core_files(scan_root, files)
+            filtered_set = set(filtered)
+            self.assertGreaterEqual(skipped, 2)  # version.php and wp-config.php
+            self.assertIn(scan_root / "wp-includes" / "load.php", filtered_set)  # changed core file kept
+            self.assertIn(scan_root / "wp-content" / "plugins" / "x.php", filtered_set)  # non-core file kept
 
 
 if __name__ == "__main__":

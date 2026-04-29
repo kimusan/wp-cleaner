@@ -18,6 +18,10 @@ import math
 import html
 import shutil
 import getpass
+import hashlib
+import zipfile
+import urllib.request
+import urllib.error
 import asyncio
 import argparse
 import logging
@@ -752,6 +756,111 @@ def _append_audit_log(
         fh.write(json.dumps(record) + "\n")
 
 
+class WordPressCoreVerifier:
+    """Verify local WordPress core files against official release files."""
+
+    def __init__(self, cache_dir: Path, offline: bool = False):
+        self.cache_dir = cache_dir
+        self.offline = offline
+        self.version: Optional[str] = None
+        self.reference_root: Optional[Path] = None
+        self.core_hashes: Dict[str, str] = {}
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 128), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def detect_version(scan_root: Path) -> Optional[str]:
+        version_file = scan_root / "wp-includes" / "version.php"
+        if not version_file.exists():
+            return None
+        try:
+            content = version_file.read_text(encoding="utf-8", errors="ignore")
+            match = re.search(r"\$wp_version\s*=\s*['\"]([^'\"]+)['\"]", content)
+            return match.group(1).strip() if match else None
+        except OSError:
+            return None
+
+    def _reference_dir_for_version(self, version: str) -> Path:
+        return self.cache_dir / "wordpress-core" / version / "wordpress"
+
+    def _zip_path_for_version(self, version: str) -> Path:
+        return self.cache_dir / "downloads" / f"wordpress-{version}.zip"
+
+    def _ensure_reference_downloaded(self, version: str) -> Path:
+        ref_dir = self._reference_dir_for_version(version)
+        if ref_dir.exists():
+            return ref_dir
+        if self.offline:
+            raise FileNotFoundError(f"offline mode enabled and no cached WordPress core for version {version}")
+
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        zip_path = self._zip_path_for_version(version)
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        url = f"https://wordpress.org/wordpress-{version}.zip"
+        urllib.request.urlretrieve(url, zip_path)  # nosec: official wordpress release URL
+
+        extract_root = ref_dir.parent
+        extract_root.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(extract_root)
+        if not ref_dir.exists():
+            raise FileNotFoundError(f"downloaded archive for {version} did not contain expected wordpress/ folder")
+        return ref_dir
+
+    def prepare(self, scan_root: Path) -> Tuple[bool, str]:
+        version = self.detect_version(scan_root)
+        if not version:
+            return False, "could not detect local WordPress version"
+        self.version = version
+        try:
+            self.reference_root = self._ensure_reference_downloaded(version)
+        except (OSError, urllib.error.URLError, zipfile.BadZipFile) as exc:
+            return False, f"failed to prepare official core reference: {exc}"
+
+        self.core_hashes.clear()
+        for root, _dirs, filenames in os.walk(self.reference_root):
+            for filename in filenames:
+                ref_path = Path(root) / filename
+                rel = str(ref_path.relative_to(self.reference_root)).replace("\\", "/")
+                try:
+                    self.core_hashes[rel] = self._sha256_file(ref_path)
+                except OSError:
+                    continue
+        return True, f"prepared WordPress core reference for version {version}"
+
+    def filter_identical_core_files(self, scan_root: Path, files: List[Path]) -> Tuple[List[Path], int]:
+        if not self.core_hashes:
+            return files, 0
+        kept: List[Path] = []
+        skipped = 0
+        for path in files:
+            try:
+                rel = str(path.relative_to(scan_root)).replace("\\", "/")
+            except ValueError:
+                kept.append(path)
+                continue
+            expected_hash = self.core_hashes.get(rel)
+            if not expected_hash:
+                kept.append(path)
+                continue
+            try:
+                local_hash = self._sha256_file(path)
+            except OSError:
+                kept.append(path)
+                continue
+            if local_hash == expected_hash:
+                skipped += 1
+            else:
+                kept.append(path)
+        return kept, skipped
+
+
 def _format_duration(seconds: float) -> str:
     seconds = max(0, int(seconds))
     mins, secs = divmod(seconds, 60)
@@ -980,12 +1089,20 @@ if TEXTUAL_AVAILABLE:
         low_count = reactive(0)
         sort_label = reactive("severity")
         
-        def __init__(self, scanner: FileScanner, scan_path: str, threads: int, audit_log_path: str = "wp-scan-remediation-audit.jsonl"):
+        def __init__(
+            self,
+            scanner: FileScanner,
+            scan_path: str,
+            threads: int,
+            audit_log_path: str = "wp-scan-remediation-audit.jsonl",
+            core_verifier: Optional[WordPressCoreVerifier] = None,
+        ):
             super().__init__()
             self.scanner = scanner
             self.scan_path = scan_path
             self.threads = threads
             self.audit_log_path = Path(audit_log_path)
+            self.core_verifier = core_verifier
             self.findings_map: Dict[str, Finding] = {}
             self.finding_rows: List[Tuple[str, Finding]] = []
             self.visible_rows: List[Tuple[str, Finding]] = []
@@ -1154,6 +1271,13 @@ if TEXTUAL_AVAILABLE:
             if not self.executor:
                 return
             files = await loop.run_in_executor(self.executor, self.scanner.collect_files, Path(self.scan_path))
+            if self.core_verifier:
+                ok, msg = self.core_verifier.prepare(Path(self.scan_path))
+                if ok:
+                    files, skipped = self.core_verifier.filter_identical_core_files(Path(self.scan_path), files)
+                    self.sub_title = f"Core baseline active ({self.core_verifier.version}), skipped {skipped} unchanged core files"
+                else:
+                    self.sub_title = f"Core baseline skipped: {msg}"
             self.total_files = len(files)
             if not files:
                 self.sub_title = "✓ No files to scan."
@@ -1451,6 +1575,9 @@ def main():
     general = parser.add_argument_group("General Options")
     general.add_argument('--threads', type=int, default=os.cpu_count(), help='Number of threads')
     general.add_argument('--signatures', default='', help='Path to custom JSON signatures file')
+    general.add_argument('--verify-core', action='store_true', help='Pre-verify against official WordPress core and skip unchanged core files')
+    general.add_argument('--verify-core-offline', action='store_true', help='Use only cached core baseline data (no network download)')
+    general.add_argument('--verify-core-cache', default='.wp-scanner-cache', help='Cache directory for official WordPress core files')
 
     tui_group = parser.add_argument_group("TUI Mode Options")
     tui_group.add_argument('--no-tui', action='store_true', help='Disable TUI and run headless scan')
@@ -1475,6 +1602,12 @@ def main():
         loaded_custom = sig_manager.load_custom()
         print(f"Loaded {loaded_custom} custom signatures from {args.signatures}")
     scanner = FileScanner(sig_manager.get_all())
+    verifier = None
+    if args.verify_core:
+        verifier = WordPressCoreVerifier(
+            cache_dir=Path(args.verify_core_cache),
+            offline=args.verify_core_offline,
+        )
 
     if args.no_tui or not TEXTUAL_AVAILABLE:
         if not TEXTUAL_AVAILABLE and not args.no_tui:
@@ -1489,7 +1622,15 @@ def main():
         stats = ScanStats()
         results = []
         
-        files = scanner.collect_files(Path(args.path))
+        scan_root = Path(args.path)
+        files = scanner.collect_files(scan_root)
+        if verifier:
+            ok, msg = verifier.prepare(scan_root)
+            if ok:
+                files, skipped = verifier.filter_identical_core_files(scan_root, files)
+                print(f"Core baseline active (version {verifier.version}); skipped {skipped} unchanged core files.")
+            else:
+                print(f"Core baseline skipped: {msg}")
         stats.total_files = len(files)
         
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
@@ -1616,7 +1757,13 @@ def main():
             )
         if args.quarantine or args.delete:
             print("Note: --quarantine/--delete are only available in headless mode (--no-tui).")
-        app = ScannerTUI(scanner=scanner, scan_path=args.path, threads=args.threads, audit_log_path=args.audit_log)
+        app = ScannerTUI(
+            scanner=scanner,
+            scan_path=args.path,
+            threads=args.threads,
+            audit_log_path=args.audit_log,
+            core_verifier=verifier,
+        )
         app.run()
 
 if __name__ == '__main__':
