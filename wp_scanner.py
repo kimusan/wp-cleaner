@@ -1358,19 +1358,21 @@ if TEXTUAL_AVAILABLE:
             if self.core_verifier:
                 ok, msg = self.core_verifier.prepare(
                     Path(self.scan_path),
-                    progress_cb=lambda message: setattr(self, "sub_title", message),
+                    progress_cb=lambda message: (setattr(self, "sub_title", message), self._set_status_message(message)),
                 )
                 if ok:
                     files, skipped, modified = self.core_verifier.filter_identical_core_files(
                         Path(self.scan_path),
                         files,
-                        progress_cb=lambda message: setattr(self, "sub_title", message),
+                        progress_cb=lambda message: (setattr(self, "sub_title", message), self._set_status_message(message)),
                     )
                     self.scanner.modified_core_paths = {str(path.resolve()) for path in modified}
                     self.scanner.modified_core_details = dict(self.core_verifier.modified_core_details)
                     self.sub_title = f"Core baseline active ({self.core_verifier.version}), skipped {skipped} unchanged core files"
+                    self._set_status_message("RUNNING", "green")
                 else:
                     self.sub_title = f"Core baseline skipped: {msg}"
+                    self._set_status_message("RUNNING", "green")
             self.total_files = len(files)
             if not files:
                 self.sub_title = "✓ No files to scan."
@@ -1379,6 +1381,7 @@ if TEXTUAL_AVAILABLE:
                 return
 
             self.sub_title = "Scanning..."
+            self._set_status_message("RUNNING", "green")
             pending: set[asyncio.Future] = set()
             for file_path in files:
                 if not self.executor:
@@ -1452,6 +1455,9 @@ if TEXTUAL_AVAILABLE:
             else:
                 state, color = "STOPPED", "red"
             self.query_one("#scan-state", Static).update(f"Status: [{color}]{state}[/]")
+
+        def _set_status_message(self, message: str, color: str = "cyan") -> None:
+            self.query_one("#scan-state", Static).update(f"Status: [{color}]{message}[/]")
 
         def action_quit(self) -> None:
             self._stop_scan()
