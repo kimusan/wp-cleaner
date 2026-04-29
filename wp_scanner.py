@@ -30,7 +30,7 @@ from datetime import datetime
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Callable, Set
 from enum import Enum
 
 try:
@@ -349,6 +349,7 @@ class FileScanner:
 
     def __init__(self, signatures: List[Signature]):
         self.signatures = signatures
+        self.modified_core_paths: Set[str] = set()
         self.compiled_patterns: List[Tuple[Signature, re.Pattern]] = []
         for sig in signatures:
             try:
@@ -400,6 +401,25 @@ class FileScanner:
         findings: List[Finding] = []
         lower_path = str(filepath).replace("\\", "/").lower()
         filename = filepath.name.lower()
+        normalized_path = str(filepath.resolve()) if filepath.exists() else str(filepath)
+
+        # H005: File is part of core tree but differs from official baseline.
+        if normalized_path in self.modified_core_paths:
+            findings.append(
+                Finding(
+                    file_path=str(filepath),
+                    line_number=1,
+                    signature_id="H005",
+                    signature_name="Heuristic: Modified WordPress Core File",
+                    threat_level=ThreatLevel.MEDIUM.value,
+                    category="heuristic_core_modified",
+                    matched_content=str(filepath),
+                    context_before="",
+                    context_after=lines[0] if lines else "",
+                    description="Core file differs from matching official WordPress release baseline.",
+                    remediation="Review diff against official core and restore trusted file if change is unauthorized.",
+                )
+            )
 
         # H001: Unexpected PHP in web-accessible uploads/cache paths.
         if filepath.suffix.lower() == ".php" and (
@@ -813,16 +833,22 @@ class WordPressCoreVerifier:
             raise FileNotFoundError(f"downloaded archive for {version} did not contain expected wordpress/ folder")
         return ref_dir
 
-    def prepare(self, scan_root: Path) -> Tuple[bool, str]:
+    def prepare(self, scan_root: Path, progress_cb: Optional[Callable[[str], None]] = None) -> Tuple[bool, str]:
+        if progress_cb:
+            progress_cb("Detecting local WordPress version...")
         version = self.detect_version(scan_root)
         if not version:
             return False, "could not detect local WordPress version"
         self.version = version
         try:
+            if progress_cb:
+                progress_cb(f"Fetching WordPress core v{version} reference...")
             self.reference_root = self._ensure_reference_downloaded(version)
         except (OSError, urllib.error.URLError, zipfile.BadZipFile) as exc:
             return False, f"failed to prepare official core reference: {exc}"
 
+        if progress_cb:
+            progress_cb(f"Hashing official WordPress core v{version}...")
         self.core_hashes.clear()
         for root, _dirs, filenames in os.walk(self.reference_root):
             for filename in filenames:
@@ -834,11 +860,19 @@ class WordPressCoreVerifier:
                     continue
         return True, f"prepared WordPress core reference for version {version}"
 
-    def filter_identical_core_files(self, scan_root: Path, files: List[Path]) -> Tuple[List[Path], int]:
+    def filter_identical_core_files(
+        self,
+        scan_root: Path,
+        files: List[Path],
+        progress_cb: Optional[Callable[[str], None]] = None,
+    ) -> Tuple[List[Path], int, Set[Path]]:
         if not self.core_hashes:
-            return files, 0
+            return files, 0, set()
+        if progress_cb:
+            progress_cb("Checking local files against official WordPress core...")
         kept: List[Path] = []
         skipped = 0
+        modified_core: Set[Path] = set()
         for path in files:
             try:
                 rel = str(path.relative_to(scan_root)).replace("\\", "/")
@@ -858,7 +892,8 @@ class WordPressCoreVerifier:
                 skipped += 1
             else:
                 kept.append(path)
-        return kept, skipped
+                modified_core.add(path)
+        return kept, skipped, modified_core
 
 
 def _format_duration(seconds: float) -> str:
@@ -1272,9 +1307,17 @@ if TEXTUAL_AVAILABLE:
                 return
             files = await loop.run_in_executor(self.executor, self.scanner.collect_files, Path(self.scan_path))
             if self.core_verifier:
-                ok, msg = self.core_verifier.prepare(Path(self.scan_path))
+                ok, msg = self.core_verifier.prepare(
+                    Path(self.scan_path),
+                    progress_cb=lambda message: setattr(self, "sub_title", message),
+                )
                 if ok:
-                    files, skipped = self.core_verifier.filter_identical_core_files(Path(self.scan_path), files)
+                    files, skipped, modified = self.core_verifier.filter_identical_core_files(
+                        Path(self.scan_path),
+                        files,
+                        progress_cb=lambda message: setattr(self, "sub_title", message),
+                    )
+                    self.scanner.modified_core_paths = {str(path.resolve()) for path in modified}
                     self.sub_title = f"Core baseline active ({self.core_verifier.version}), skipped {skipped} unchanged core files"
                 else:
                     self.sub_title = f"Core baseline skipped: {msg}"
@@ -1625,9 +1668,10 @@ def main():
         scan_root = Path(args.path)
         files = scanner.collect_files(scan_root)
         if verifier:
-            ok, msg = verifier.prepare(scan_root)
+            ok, msg = verifier.prepare(scan_root, progress_cb=print)
             if ok:
-                files, skipped = verifier.filter_identical_core_files(scan_root, files)
+                files, skipped, modified = verifier.filter_identical_core_files(scan_root, files, progress_cb=print)
+                scanner.modified_core_paths = {str(path.resolve()) for path in modified}
                 print(f"Core baseline active (version {verifier.version}); skipped {skipped} unchanged core files.")
             else:
                 print(f"Core baseline skipped: {msg}")

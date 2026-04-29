@@ -167,11 +167,17 @@ class ScannerTests(unittest.TestCase):
             self.assertTrue(ok)
 
             files = self.scanner.collect_files(scan_root)
-            filtered, skipped = verifier.filter_identical_core_files(scan_root, files)
+            filtered, skipped, modified = verifier.filter_identical_core_files(scan_root, files)
             filtered_set = set(filtered)
             self.assertGreaterEqual(skipped, 2)  # version.php and wp-config.php
             self.assertIn(scan_root / "wp-includes" / "load.php", filtered_set)  # changed core file kept
             self.assertIn(scan_root / "wp-content" / "plugins" / "x.php", filtered_set)  # non-core file kept
+            self.assertIn(scan_root / "wp-includes" / "load.php", modified)
+
+            self.scanner.modified_core_paths = {str(path.resolve()) for path in modified}
+            result = self.scanner.scan_file(scan_root / "wp-includes" / "load.php")
+            heuristic_ids = {f.signature_id for f in result.findings}
+            self.assertIn("H005", heuristic_ids)
 
 
 if __name__ == "__main__":
