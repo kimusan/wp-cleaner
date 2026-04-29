@@ -36,7 +36,7 @@ from enum import Enum
 try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
-    from textual.containers import Container, Horizontal
+    from textual.containers import Container, Horizontal, VerticalScroll
     from textual.reactive import reactive
     from textual.screen import ModalScreen
     from textual.widgets import Header, Footer, DataTable, Label, ProgressBar, Static, Button
@@ -350,6 +350,7 @@ class FileScanner:
     def __init__(self, signatures: List[Signature]):
         self.signatures = signatures
         self.modified_core_paths: Set[str] = set()
+        self.modified_core_details: Dict[str, Dict[str, str | int]] = {}
         self.compiled_patterns: List[Tuple[Signature, re.Pattern]] = []
         for sig in signatures:
             try:
@@ -405,18 +406,30 @@ class FileScanner:
 
         # H005: File is part of core tree but differs from official baseline.
         if normalized_path in self.modified_core_paths:
+            line_num = 1
+            local_line = lines[0] if lines else ""
+            ref_line = ""
+            details = self.modified_core_details.get(normalized_path)
+            if details:
+                line_num = int(details.get("line_number", 1))
+                local_line = str(details.get("local_line", local_line))
+                ref_line = str(details.get("reference_line", ""))
+            context_before, context_after = self._context_for_line(lines, line_num)
             findings.append(
                 Finding(
                     file_path=str(filepath),
-                    line_number=1,
+                    line_number=line_num,
                     signature_id="H005",
                     signature_name="Heuristic: Modified WordPress Core File",
                     threat_level=ThreatLevel.MEDIUM.value,
                     category="heuristic_core_modified",
-                    matched_content=str(filepath),
-                    context_before="",
-                    context_after=lines[0] if lines else "",
-                    description="Core file differs from matching official WordPress release baseline.",
+                    matched_content=(local_line[:200] if local_line else str(filepath)),
+                    context_before=context_before,
+                    context_after=context_after,
+                    description=(
+                        "Core file differs from matching official WordPress release baseline."
+                        + (f" Reference line: {ref_line[:120]}" if ref_line else "")
+                    ),
                     remediation="Review diff against official core and restore trusted file if change is unauthorized.",
                 )
             )
@@ -785,6 +798,7 @@ class WordPressCoreVerifier:
         self.version: Optional[str] = None
         self.reference_root: Optional[Path] = None
         self.core_hashes: Dict[str, str] = {}
+        self.modified_core_details: Dict[str, Dict[str, str | int]] = {}
 
     @staticmethod
     def _sha256_file(path: Path) -> str:
@@ -873,6 +887,7 @@ class WordPressCoreVerifier:
         kept: List[Path] = []
         skipped = 0
         modified_core: Set[Path] = set()
+        self.modified_core_details.clear()
         for path in files:
             try:
                 rel = str(path.relative_to(scan_root)).replace("\\", "/")
@@ -893,7 +908,31 @@ class WordPressCoreVerifier:
             else:
                 kept.append(path)
                 modified_core.add(path)
+                try:
+                    rel = str(path.relative_to(scan_root)).replace("\\", "/")
+                    ref_path = self.reference_root / rel if self.reference_root else None
+                    if ref_path and ref_path.exists():
+                        line_num, local_line, ref_line = self._first_diff_line(path, ref_path)
+                        self.modified_core_details[str(path.resolve())] = {
+                            "line_number": line_num,
+                            "local_line": local_line,
+                            "reference_line": ref_line,
+                        }
+                except Exception:
+                    pass
         return kept, skipped, modified_core
+
+    @staticmethod
+    def _first_diff_line(local_path: Path, ref_path: Path) -> Tuple[int, str, str]:
+        local_lines = local_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        ref_lines = ref_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        max_len = max(len(local_lines), len(ref_lines))
+        for idx in range(max_len):
+            local_line = local_lines[idx] if idx < len(local_lines) else ""
+            ref_line = ref_lines[idx] if idx < len(ref_lines) else ""
+            if local_line != ref_line:
+                return idx + 1, local_line, ref_line
+        return 1, local_lines[0] if local_lines else "", ref_lines[0] if ref_lines else ""
 
 
 def _format_duration(seconds: float) -> str:
@@ -973,6 +1012,8 @@ if TEXTUAL_AVAILABLE:
             try:
                 lines = Path(self.finding.file_path).read_text(encoding="utf-8", errors="ignore").splitlines()
                 if lines:
+                    if self._show_full_source():
+                        return "\n".join(lines).replace("\x00", ""), max(1, self.finding.line_number), 1
                     start = max(1, self.finding.line_number - 3)
                     end = min(len(lines), self.finding.line_number + 3)
                     snippet = "\n".join(lines[start - 1:end]).replace("\x00", "")
@@ -982,6 +1023,13 @@ if TEXTUAL_AVAILABLE:
                 pass
             return self.finding.matched_content.strip()[:220], 1, self.finding.line_number
 
+        def _show_full_source(self) -> bool:
+            if self.finding.category == "backdoor":
+                return True
+            if self.finding.signature_id in {"H001", "H002"}:
+                return True
+            return False
+
         def compose(self) -> ComposeResult:
             with Container(id="detail-container", classes="popup"):
                 sev_style = SEVERITY_STYLES.get(self.finding.threat_level, "white")
@@ -989,7 +1037,8 @@ if TEXTUAL_AVAILABLE:
                 yield Label(f"[b]File:[/b] {self.finding.file_path}:{self.finding.line_number}")
                 yield Label(f"[b]Signature ID:[/b] {self.finding.signature_id}    [b]Category:[/b] {self.finding.category}")
                 yield Label("[b]Code Context[/b]")
-                yield Static(self._render_code_panel(), classes="code-view")
+                with VerticalScroll(classes="code-view"):
+                    yield Static(self._render_code_panel())
                 yield Label(f"[b]What it means:[/b] {self.finding.description}", classes="wrap")
                 yield Label(f"[b]How to remove:[/b] {self.finding.remediation}", classes="wrap")
 
@@ -1318,6 +1367,7 @@ if TEXTUAL_AVAILABLE:
                         progress_cb=lambda message: setattr(self, "sub_title", message),
                     )
                     self.scanner.modified_core_paths = {str(path.resolve()) for path in modified}
+                    self.scanner.modified_core_details = dict(self.core_verifier.modified_core_details)
                     self.sub_title = f"Core baseline active ({self.core_verifier.version}), skipped {skipped} unchanged core files"
                 else:
                     self.sub_title = f"Core baseline skipped: {msg}"
@@ -1672,6 +1722,7 @@ def main():
             if ok:
                 files, skipped, modified = verifier.filter_identical_core_files(scan_root, files, progress_cb=print)
                 scanner.modified_core_paths = {str(path.resolve()) for path in modified}
+                scanner.modified_core_details = dict(verifier.modified_core_details)
                 print(f"Core baseline active (version {verifier.version}); skipped {skipped} unchanged core files.")
             else:
                 print(f"Core baseline skipped: {msg}")
