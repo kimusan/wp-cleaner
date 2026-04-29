@@ -1356,15 +1356,23 @@ if TEXTUAL_AVAILABLE:
                 return
             files = await loop.run_in_executor(self.executor, self.scanner.collect_files, Path(self.scan_path))
             if self.core_verifier:
-                ok, msg = self.core_verifier.prepare(
+                def _progress(message: str) -> None:
+                    self.call_from_thread(setattr, self, "sub_title", message)
+                    self.call_from_thread(self._set_status_message, message)
+
+                ok, msg = await loop.run_in_executor(
+                    self.executor,
+                    self.core_verifier.prepare,
                     Path(self.scan_path),
-                    progress_cb=lambda message: (setattr(self, "sub_title", message), self._set_status_message(message)),
+                    _progress,
                 )
                 if ok:
-                    files, skipped, modified = self.core_verifier.filter_identical_core_files(
+                    files, skipped, modified = await loop.run_in_executor(
+                        self.executor,
+                        self.core_verifier.filter_identical_core_files,
                         Path(self.scan_path),
                         files,
-                        progress_cb=lambda message: (setattr(self, "sub_title", message), self._set_status_message(message)),
+                        _progress,
                     )
                     self.scanner.modified_core_paths = {str(path.resolve()) for path in modified}
                     self.scanner.modified_core_details = dict(self.core_verifier.modified_core_details)
