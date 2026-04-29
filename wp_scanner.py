@@ -776,25 +776,40 @@ def _collect_infected_paths(results: List[ScanResult]) -> List[Path]:
 def _confirm_remediation(action: str, count: int, non_interactive_yes: bool) -> bool:
     if non_interactive_yes:
         return True
-    reply = input(f"{action} {count} infected files? Type 'yes' to continue: ").strip().lower()
+    if count > 0:
+        prompt = f"{action} {count} infected files? Type 'yes' to continue: "
+    else:
+        prompt = f"{action}? Type 'yes' to continue: "
+    reply = input(prompt).strip().lower()
     return reply == "yes"
 
 
-def _apply_quarantine(paths: List[Path], quarantine_dir: Path) -> Tuple[int, int]:
+def _quarantine_path(src: Path, quarantine_dir: Path) -> Tuple[bool, Optional[Path], str]:
+    try:
+        dst = quarantine_dir / src.name
+        if dst.exists():
+            stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            dst = quarantine_dir / f"{src.stem}-{stamp}{src.suffix}"
+        shutil.move(str(src), str(dst))
+        return True, dst, ""
+    except Exception as exc:
+        return False, None, str(exc)
+
+
+def _apply_quarantine(paths: List[Path], quarantine_dir: Path) -> Tuple[int, int, List[Dict[str, str]]]:
     quarantine_dir.mkdir(parents=True, exist_ok=True)
     moved = 0
     failed = 0
+    records: List[Dict[str, str]] = []
     for src in paths:
-        try:
-            dst = quarantine_dir / src.name
-            if dst.exists():
-                stamp = datetime.now().strftime("%Y%m%d%H%M%S")
-                dst = quarantine_dir / f"{src.stem}-{stamp}{src.suffix}"
-            shutil.move(str(src), str(dst))
+        ok, dst, error = _quarantine_path(src, quarantine_dir)
+        if ok and dst is not None:
             moved += 1
-        except Exception:
+            records.append({"target": str(src), "quarantine_path": str(dst), "result": "success"})
+        else:
             failed += 1
-    return moved, failed
+            records.append({"target": str(src), "quarantine_path": "", "result": "failed", "error": error})
+    return moved, failed, records
 
 
 def _apply_delete(paths: List[Path]) -> Tuple[int, int]:
@@ -872,6 +887,61 @@ def _load_audit_summary(log_path: Path, tail: int = 20) -> Dict:
             summary[result] += 1
     recent = actions[-tail:]
     return {"summary": summary, "recent_actions": recent}
+
+
+def _restore_from_audit(
+    log_path: Path,
+    *,
+    target_filter: Optional[Set[str]] = None,
+) -> Dict[str, int]:
+    if not log_path.exists():
+        return {"restored": 0, "failed": 0, "skipped": 0}
+    restored = 0
+    failed = 0
+    skipped = 0
+    seen: Set[Tuple[str, str]] = set()
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return {"restored": 0, "failed": 0, "skipped": 0}
+
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if str(row.get("action", "")).lower() != "quarantine":
+            continue
+        if str(row.get("result", "")).lower() != "success":
+            continue
+        target = str(row.get("target", "")).strip()
+        quarantine_path = str(row.get("details", {}).get("quarantine_path", "")).strip()
+        if not target or not quarantine_path:
+            continue
+        if target_filter and target not in target_filter:
+            continue
+        token = (target, quarantine_path)
+        if token in seen:
+            continue
+        seen.add(token)
+        src = Path(quarantine_path)
+        dst = Path(target)
+        if not src.exists():
+            skipped += 1
+            continue
+        if dst.exists():
+            skipped += 1
+            continue
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dst))
+            restored += 1
+        except Exception:
+            failed += 1
+    return {"restored": restored, "failed": failed, "skipped": skipped}
 
 
 class WordPressCoreVerifier:
@@ -1211,6 +1281,7 @@ if TEXTUAL_AVAILABLE:
             ("e", "export_results", "Export"),
             ("x", "quarantine_selected", "Quarantine"),
             ("delete", "delete_selected", "Delete"),
+            ("u", "restore_selected", "Restore"),
         ]
         CSS = """
         #main-container { padding: 1; height: 1fr; }
@@ -1311,6 +1382,7 @@ if TEXTUAL_AVAILABLE:
                             yield Button("Export", id="action-export")
                             yield Button("Quarantine Selected", id="action-quarantine")
                             yield Button("Delete Selected", id="action-delete")
+                            yield Button("Restore Selected", id="action-restore")
                     with Container(id="logo-panel"):
                         yield Static(Text(self.LOGO, no_wrap=True, overflow="crop"), id="logo")
                 yield Static("Status: RUNNING", id="scan-state")
@@ -1657,16 +1729,22 @@ if TEXTUAL_AVAILABLE:
                     self.bell()
                     return
                 if action == "quarantine":
-                    moved, failed = _apply_quarantine([src], Path("quarantine"))
+                    moved, failed, records = _apply_quarantine([src], Path("quarantine"))
                     self.query_one("#sort-help", Static).update(f"Quarantine complete: moved={moved}, failed={failed}")
-                    _append_audit_log(
-                        self.audit_log_path,
-                        mode="tui",
-                        action="quarantine",
-                        target=finding.file_path,
-                        result="success" if moved else "failed",
-                        details={"moved": moved, "failed": failed},
-                    )
+                    for rec in records:
+                        _append_audit_log(
+                            self.audit_log_path,
+                            mode="tui",
+                            action="quarantine",
+                            target=rec["target"],
+                            result=rec["result"],
+                            details={
+                                "moved": moved,
+                                "failed": failed,
+                                "quarantine_path": rec.get("quarantine_path", ""),
+                                "error": rec.get("error", ""),
+                            },
+                        )
                     if moved:
                         self._drop_file_findings(finding.file_path)
                 else:
@@ -1705,6 +1783,35 @@ if TEXTUAL_AVAILABLE:
                 return
             self._confirm_and_run("delete", finding)
 
+        def action_restore_selected(self) -> None:
+            if not self.scan_complete:
+                self.bell()
+                return
+            finding = self._selected_finding()
+            if not finding:
+                self.bell()
+                return
+            label = "Restore selected file from quarantine?"
+
+            def _after(confirm: bool) -> None:
+                if not confirm:
+                    self.query_one("#sort-help", Static).update("Restore cancelled")
+                    return
+                outcome = _restore_from_audit(self.audit_log_path, target_filter={finding.file_path})
+                self.query_one("#sort-help", Static).update(
+                    f"Restore complete: restored={outcome['restored']}, failed={outcome['failed']}, skipped={outcome['skipped']}"
+                )
+                _append_audit_log(
+                    self.audit_log_path,
+                    mode="tui",
+                    action="restore",
+                    target=finding.file_path,
+                    result="success" if outcome["restored"] > 0 and outcome["failed"] == 0 else "partial" if outcome["restored"] > 0 else "failed",
+                    details=outcome,
+                )
+
+            self.push_screen(ConfirmActionScreen(label, finding.file_path), _after)
+
         def on_button_pressed(self, event: Button.Pressed) -> None:
             button_id = event.button.id or ""
             if button_id == "action-rescan":
@@ -1718,6 +1825,9 @@ if TEXTUAL_AVAILABLE:
                 return
             if button_id == "action-delete":
                 self.action_delete_selected()
+                return
+            if button_id == "action-restore":
+                self.action_restore_selected()
                 return
             if not button_id.startswith("filter-"):
                 return
@@ -1782,11 +1892,13 @@ def main():
     remediation.add_argument('--quarantine', action='store_true', help='Move infected files to quarantine directory after scan')
     remediation.add_argument('--quarantine-dir', default='quarantine', help='Quarantine directory path used with --quarantine')
     remediation.add_argument('--delete', action='store_true', help='Delete infected files after scan')
-    remediation.add_argument('--yes', action='store_true', help='Skip remediation confirmation prompt for --quarantine/--delete')
+    remediation.add_argument('--restore', action='store_true', help='Restore files from quarantine using the audit log and exit')
+    remediation.add_argument('--yes', action='store_true', help='Skip remediation confirmation prompt for --quarantine/--delete/--restore')
     remediation.add_argument('--audit-log', default='wp-scan-remediation-audit.jsonl', help='Append remediation audit log to this JSONL file')
     args = parser.parse_args()
-    if args.quarantine and args.delete:
-        parser.error("--quarantine and --delete are mutually exclusive")
+    selected_actions = sum(bool(x) for x in (args.quarantine, args.delete, args.restore))
+    if selected_actions > 1:
+        parser.error("--quarantine, --delete and --restore are mutually exclusive")
 
     sig_manager = SignatureManager(custom_signature_file=args.signatures or None)
     sig_manager.load_builtin()
@@ -1808,6 +1920,32 @@ def main():
                 f"TUI unavailable ({reason}). Falling back to headless mode.\n"
                 "Install TUI dependencies with: pip install 'wp-scanner[tui]'"
             )
+        if args.restore:
+            if _confirm_remediation("Restore files from quarantine", 0, args.yes):
+                outcome = _restore_from_audit(Path(args.audit_log))
+                print(
+                    f"Restore complete: restored={outcome['restored']}, "
+                    f"failed={outcome['failed']}, skipped={outcome['skipped']}"
+                )
+                _append_audit_log(
+                    Path(args.audit_log),
+                    mode="headless",
+                    action="restore",
+                    target="*",
+                    result="success" if outcome["restored"] > 0 and outcome["failed"] == 0 else "partial" if outcome["restored"] > 0 else "failed",
+                    details=outcome,
+                )
+            else:
+                print("Restore cancelled.")
+                _append_audit_log(
+                    Path(args.audit_log),
+                    mode="headless",
+                    action="restore",
+                    target="*",
+                    result="cancelled",
+                    details={},
+                )
+            return
         
         print(f"Scanning {args.path}...")
         start_time = time.time()
@@ -1889,16 +2027,22 @@ def main():
         infected_paths = _collect_infected_paths(results)
         if args.quarantine and infected_paths:
             if _confirm_remediation("Quarantine", len(infected_paths), args.yes):
-                moved, failed = _apply_quarantine(infected_paths, Path(args.quarantine_dir))
+                moved, failed, records = _apply_quarantine(infected_paths, Path(args.quarantine_dir))
                 print(f"Quarantine complete: moved={moved}, failed={failed}, dir={Path(args.quarantine_dir)}")
-                for path in infected_paths:
+                for rec in records:
                     _append_audit_log(
                         Path(args.audit_log),
                         mode="headless",
                         action="quarantine",
-                        target=str(path),
-                        result="success" if moved > 0 and failed == 0 else "partial" if moved > 0 else "failed",
-                        details={"quarantine_dir": str(Path(args.quarantine_dir)), "moved": moved, "failed": failed},
+                        target=rec["target"],
+                        result=rec["result"],
+                        details={
+                            "quarantine_dir": str(Path(args.quarantine_dir)),
+                            "moved": moved,
+                            "failed": failed,
+                            "quarantine_path": rec.get("quarantine_path", ""),
+                            "error": rec.get("error", ""),
+                        },
                     )
             else:
                 print("Quarantine cancelled.")

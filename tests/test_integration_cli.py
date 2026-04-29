@@ -193,6 +193,60 @@ class CliIntegrationTests(unittest.TestCase):
             self.assertTrue(audit.exists())
             self.assertIn("\"action\": \"delete\"", audit.read_text(encoding="utf-8"))
 
+    def test_headless_cli_restore_recovers_quarantined_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "infected.php"
+            target.write_text(
+                "<?php\n"
+                "eval(base64_decode('ZWNobyAnaGVsbG8nOw=='));\n",
+                encoding="utf-8",
+            )
+            qdir = root / "qbox"
+            audit = root / "audit.jsonl"
+
+            quarantine_proc = subprocess.run(
+                [
+                    "python3",
+                    "wp-scanner.py",
+                    str(root),
+                    "--no-tui",
+                    "--threads",
+                    "1",
+                    "--quarantine",
+                    "--quarantine-dir",
+                    str(qdir),
+                    "--audit-log",
+                    str(audit),
+                    "--yes",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(quarantine_proc.returncode, 0, quarantine_proc.stderr)
+            self.assertFalse(target.exists())
+            self.assertTrue((qdir / "infected.php").exists())
+
+            restore_proc = subprocess.run(
+                [
+                    "python3",
+                    "wp-scanner.py",
+                    str(root),
+                    "--no-tui",
+                    "--restore",
+                    "--audit-log",
+                    str(audit),
+                    "--yes",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(restore_proc.returncode, 0, restore_proc.stderr)
+            self.assertIn("Restore complete:", restore_proc.stdout)
+            self.assertTrue(target.exists())
+
     def test_headless_cli_verify_core_offline_graceful(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
