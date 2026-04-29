@@ -217,6 +217,50 @@ class CliIntegrationTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertIn("Core baseline skipped:", proc.stdout)
 
+    def test_report_json_contains_remediation_audit_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "infected.php"
+            target.write_text(
+                "<?php\n"
+                "eval(base64_decode('ZWNobyAnaGVsbG8nOw=='));\n",
+                encoding="utf-8",
+            )
+            audit = root / "audit.jsonl"
+            report = root / "report.json"
+
+            proc = subprocess.run(
+                [
+                    "python3",
+                    "wp-scanner.py",
+                    str(root),
+                    "--no-tui",
+                    "--threads",
+                    "1",
+                    "--delete",
+                    "--yes",
+                    "--audit-log",
+                    str(audit),
+                    "--report-json",
+                    str(report),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            payload = json.loads(report.read_text(encoding="utf-8"))
+            self.assertIn("remediation_audit", payload)
+            self.assertIn("summary", payload["remediation_audit"])
+            summary = payload["remediation_audit"]["summary"]
+            self.assertIn("total_actions", summary)
+            self.assertIn("success", summary)
+            self.assertIn("failed", summary)
+            self.assertIn("cancelled", summary)
+            self.assertIn("noop", summary)
+            self.assertIn("partial", summary)
+            self.assertGreaterEqual(summary["total_actions"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

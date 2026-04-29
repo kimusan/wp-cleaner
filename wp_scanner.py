@@ -585,8 +585,12 @@ class ReportGenerator:
         return all_findings
 
     @staticmethod
-    def generate_json_report(results: List[ScanResult], stats: ScanStats) -> Dict:
-        return {
+    def generate_json_report(
+        results: List[ScanResult],
+        stats: ScanStats,
+        remediation_audit: Optional[Dict] = None,
+    ) -> Dict:
+        payload = {
             "generated_at": datetime.now().isoformat(),
             "scan_stats": {
                 "total_files": stats.total_files,
@@ -615,9 +619,16 @@ class ReportGenerator:
                 for f in ReportGenerator.findings_sorted(results)
             ],
         }
+        if remediation_audit is not None:
+            payload["remediation_audit"] = remediation_audit
+        return payload
 
     @staticmethod
-    def generate_html_report(results: List[ScanResult], stats: ScanStats) -> str:
+    def generate_html_report(
+        results: List[ScanResult],
+        stats: ScanStats,
+        remediation_audit: Optional[Dict] = None,
+    ) -> str:
         findings = ReportGenerator.findings_sorted(results)
         rows = []
         for finding in findings:
@@ -636,6 +647,37 @@ class ReportGenerator:
             )
 
         findings_table = "\n".join(rows) if rows else "<tr><td colspan='8'>No threats detected.</td></tr>"
+        remediation_html = ""
+        if remediation_audit:
+            summary = remediation_audit.get("summary", {})
+            recent_rows = []
+            for row in remediation_audit.get("recent_actions", []):
+                recent_rows.append(
+                    "<tr>"
+                    f"<td>{html.escape(str(row.get('timestamp', '')))}</td>"
+                    f"<td>{html.escape(str(row.get('mode', '')))}</td>"
+                    f"<td>{html.escape(str(row.get('action', '')))}</td>"
+                    f"<td>{html.escape(str(row.get('result', '')))}</td>"
+                    f"<td>{html.escape(str(row.get('target', '')))}</td>"
+                    "</tr>"
+                )
+            recent_table = "\n".join(recent_rows) if recent_rows else "<tr><td colspan='5'>No remediation actions recorded.</td></tr>"
+            remediation_html = f"""
+  <div class="summary">
+    <h2>Remediation Audit</h2>
+    <div>Total Actions: {summary.get('total_actions', 0)}</div>
+    <div>Success: {summary.get('success', 0)} | Failed: {summary.get('failed', 0)} | Cancelled: {summary.get('cancelled', 0)} | No-op: {summary.get('noop', 0)} | Partial: {summary.get('partial', 0)}</div>
+  </div>
+  <h2>Recent Remediation Actions</h2>
+  <table>
+    <thead>
+      <tr><th>Timestamp</th><th>Mode</th><th>Action</th><th>Result</th><th>Target</th></tr>
+    </thead>
+    <tbody>
+      {recent_table}
+    </tbody>
+  </table>
+"""
         return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -680,6 +722,7 @@ class ReportGenerator:
       {findings_table}
     </tbody>
   </table>
+{remediation_html}
 </body>
 </html>"""
 
@@ -787,6 +830,48 @@ def _append_audit_log(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(record) + "\n")
+
+
+def _load_audit_summary(log_path: Path, tail: int = 20) -> Dict:
+    if not log_path.exists():
+        return {
+            "summary": {
+                "total_actions": 0,
+                "success": 0,
+                "failed": 0,
+                "cancelled": 0,
+                "noop": 0,
+                "partial": 0,
+            },
+            "recent_actions": [],
+        }
+    actions: List[Dict] = []
+    try:
+        for line in log_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                actions.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except OSError:
+        pass
+
+    summary = {
+        "total_actions": len(actions),
+        "success": 0,
+        "failed": 0,
+        "cancelled": 0,
+        "noop": 0,
+        "partial": 0,
+    }
+    for row in actions:
+        result = str(row.get("result", "")).lower()
+        if result in summary:
+            summary[result] += 1
+    recent = actions[-tail:]
+    return {"summary": summary, "recent_actions": recent}
 
 
 class WordPressCoreVerifier:
@@ -1777,11 +1862,12 @@ def main():
         stats.total_findings = stats.critical + stats.high + stats.medium + stats.low
         print("\nScan complete.")
         
+        remediation_audit = _load_audit_summary(Path(args.audit_log))
         report = ReportGenerator.generate_text_report(results, stats)
         print(report)
 
         if args.report_json:
-            json_report = ReportGenerator.generate_json_report(results, stats)
+            json_report = ReportGenerator.generate_json_report(results, stats, remediation_audit=remediation_audit)
             report_path = _resolve_report_output_path(
                 args.report_json,
                 extension="json",
@@ -1791,7 +1877,7 @@ def main():
             print(f"JSON report written: {report_path}")
 
         if args.report_html:
-            html_report = ReportGenerator.generate_html_report(results, stats)
+            html_report = ReportGenerator.generate_html_report(results, stats, remediation_audit=remediation_audit)
             report_path = _resolve_report_output_path(
                 args.report_html,
                 extension="html",
