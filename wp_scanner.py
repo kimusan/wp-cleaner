@@ -1905,7 +1905,7 @@ if TEXTUAL_AVAILABLE:
             audit_log_path: str = "wp-scan-remediation-audit.jsonl",
             core_verifier: Optional[WordPressCoreVerifier] = None,
             extension_verifier: Optional[WordPressExtensionVerifier] = None,
-            remote_config: Optional[RemoteSSHConfig] = None,
+            remote_config: Optional["RemoteSSHConfig"] = None,
         ):
             super().__init__()
             self.scanner = scanner
@@ -1915,7 +1915,7 @@ if TEXTUAL_AVAILABLE:
             self.core_verifier = core_verifier
             self.extension_verifier = extension_verifier
             self.remote_config = remote_config
-            self.remote_collector: Optional[RemoteSSHCollector] = None
+            self.remote_collector: Optional["RemoteSSHCollector"] = None
             self.signature_target_types: Dict[str, str] = {
                 sig.id: (sig.target_type or "all") for sig in self.scanner.signatures
             }
