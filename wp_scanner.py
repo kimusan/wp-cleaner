@@ -125,7 +125,29 @@ class Finding:
     context_after: str
     description: str
     remediation: str
+    location: str = "unknown"
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+
+
+def classify_path_location(path: Path) -> str:
+    p = str(path).replace("\\", "/").lower()
+    if "/wp-content/plugins/" in p:
+        return "plugin"
+    if "/wp-content/mu-plugins/" in p:
+        return "mu-plugin"
+    if "/wp-content/themes/" in p:
+        return "theme"
+    if "/wp-content/uploads/" in p:
+        return "upload"
+    if "/wp-content/languages/" in p:
+        return "language-pack"
+    if "/wp-content/cache/" in p:
+        return "cache"
+    if "/wp-admin/" in p or "/wp-includes/" in p:
+        return "core"
+    if re.search(r"/wp-[^/]+\.php$", p):
+        return "core"
+    return "unknown"
 
 @dataclass
 class ScanResult:
@@ -406,6 +428,7 @@ class FileScanner:
 
     def _heuristic_findings(self, filepath: Path, content: str, lines: List[str]) -> List[Finding]:
         findings: List[Finding] = []
+        location = classify_path_location(filepath)
         lower_path = str(filepath).replace("\\", "/").lower()
         filename = filepath.name.lower()
         normalized_path = str(filepath.resolve()) if filepath.exists() else str(filepath)
@@ -437,6 +460,7 @@ class FileScanner:
                         + (f" Reference line: {ref_line[:120]}" if ref_line else "")
                     ),
                     remediation="Review diff against official core and restore trusted file if change is unauthorized.",
+                    location=location,
                 )
             )
 
@@ -457,6 +481,7 @@ class FileScanner:
                     context_after=lines[0] if lines else "",
                     description="PHP file located in uploads/cache path; this is a common malware drop location.",
                     remediation="Move/inspect the file immediately and block PHP execution in uploads/cache directories.",
+                    location=location,
                 )
             )
 
@@ -475,6 +500,7 @@ class FileScanner:
                     context_after=lines[0] if lines else "",
                     description="Suspicious filename camouflage (double extension or hidden php filename).",
                     remediation="Verify file origin and purpose; quarantine if not part of known application code.",
+                    location=location,
                 )
             )
 
@@ -495,6 +521,7 @@ class FileScanner:
                         context_after=lines[0] if lines else "",
                         description="File is world-writable, which is often abused by webshells and droppers.",
                         remediation="Restrict file permissions (e.g., 0644 for files) and audit recent changes.",
+                        location=location,
                     )
                 )
         except OSError:
@@ -521,6 +548,7 @@ class FileScanner:
                     context_after=context_after,
                     description=f"Long high-entropy token detected (entropy {entropy:.2f}), often used in encoded payloads.",
                     remediation="Decode/review token origin and execution path; remove if unrelated to trusted application logic.",
+                    location=location,
                 )
             )
             break
@@ -530,6 +558,7 @@ class FileScanner:
     def scan_file(self, filepath: Path) -> ScanResult:
         start_time = time.monotonic()
         findings: List[Finding] = []
+        location = classify_path_location(filepath)
         seen_finding_keys: set[tuple[str, int, str]] = set()
         signature_match_counts: Dict[str, int] = {}
         try:
@@ -558,7 +587,7 @@ class FileScanner:
                     end = min(len(lines), line_num + 3)
                     context_before = "\n".join(lines[start:line_num - 1])
                     context_after = "\n".join(lines[line_num:end])
-                    findings.append(Finding(file_path=str(filepath), line_number=line_num, signature_id=sig.id, signature_name=sig.name, threat_level=sig.threat_level.value, category=sig.category, matched_content=matched_text, context_before=context_before, context_after=context_after, description=sig.description, remediation=sig.remediation))
+                    findings.append(Finding(file_path=str(filepath), line_number=line_num, signature_id=sig.id, signature_name=sig.name, threat_level=sig.threat_level.value, category=sig.category, matched_content=matched_text, context_before=context_before, context_after=context_after, description=sig.description, remediation=sig.remediation, location=location))
                     seen_finding_keys.add(dedupe_key)
                     signature_match_counts[sig.id] += 1
 
@@ -617,6 +646,7 @@ class ReportGenerator:
                     "signature_name": f.signature_name,
                     "threat_level": f.threat_level,
                     "category": f.category,
+                    "location": f.location,
                     "matched_content": f.matched_content,
                     "description": f.description,
                     "remediation": f.remediation,
@@ -647,12 +677,13 @@ class ReportGenerator:
                 f"<td>{html.escape(finding.signature_id)}</td>"
                 f"<td>{html.escape(finding.signature_name)}</td>"
                 f"<td>{html.escape(finding.category)}</td>"
+                f"<td>{html.escape(finding.location)}</td>"
                 f"<td>{html.escape(finding.description)}</td>"
                 f"<td>{html.escape(finding.remediation)}</td>"
                 "</tr>"
             )
 
-        findings_table = "\n".join(rows) if rows else "<tr><td colspan='8'>No threats detected.</td></tr>"
+        findings_table = "\n".join(rows) if rows else "<tr><td colspan='9'>No threats detected.</td></tr>"
         remediation_html = ""
         if remediation_audit:
             summary = remediation_audit.get("summary", {})
@@ -721,7 +752,7 @@ class ReportGenerator:
     <thead>
       <tr>
         <th>Severity</th><th>File</th><th>Line</th><th>Signature ID</th>
-        <th>Threat</th><th>Category</th><th>Description</th><th>Remediation</th>
+        <th>Threat</th><th>Category</th><th>Location</th><th>Description</th><th>Remediation</th>
       </tr>
     </thead>
     <tbody>
@@ -1591,7 +1622,7 @@ if TEXTUAL_AVAILABLE:
 
         def on_mount(self) -> None:
             table = self.query_one(DataTable)
-            table.add_columns("Sel", "Level", "File", "Threat", "Line")
+            table.add_columns("Sel", "Level", "File", "Location", "Threat", "Line")
             table.cursor_type = "row"
             table.focus()
             self._start_scan()
@@ -1671,6 +1702,7 @@ if TEXTUAL_AVAILABLE:
                     mark,
                     self._severity_markup(finding),
                     Path(finding.file_path).name,
+                    finding.location,
                     finding.signature_name,
                     str(finding.line_number),
                     key=key,
@@ -1715,6 +1747,7 @@ if TEXTUAL_AVAILABLE:
                 mark,
                 self._severity_markup(finding),
                 Path(finding.file_path).name,
+                finding.location,
                 finding.signature_name,
                 str(finding.line_number),
                 key=key,
@@ -1895,6 +1928,7 @@ if TEXTUAL_AVAILABLE:
                         "signature_name": finding.signature_name,
                         "threat_level": finding.threat_level,
                         "category": finding.category,
+                        "location": finding.location,
                         "matched_content": finding.matched_content,
                         "description": finding.description,
                         "remediation": finding.remediation,

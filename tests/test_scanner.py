@@ -79,6 +79,23 @@ class ScannerTests(unittest.TestCase):
             self.assertGreaterEqual(len(result.findings), 1)
             self.assertTrue(any(f.signature_id == "WP021" for f in result.findings))
 
+    def test_scan_file_sets_location_for_plugin_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_dir = root / "wp-content" / "plugins" / "demo-plugin"
+            plugin_dir.mkdir(parents=True, exist_ok=True)
+            target = plugin_dir / "mal.php"
+            target.write_text(
+                "<?php\n"
+                "eval(base64_decode('ZWNobyAnaGVsbG8nOw=='));\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP021" for f in result.findings))
+            self.assertTrue(all(f.location == "plugin" for f in result.findings))
+
     def test_scan_file_detects_include_from_superglobal(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
