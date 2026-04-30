@@ -159,6 +159,20 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(result.status, ScanStatus.COMPLETED.value)
             self.assertFalse(any(f.signature_id == "WP036" for f in result.findings))
 
+    def test_scan_file_does_not_flag_gethash_sethash_as_miner_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "core.js"
+            target.write_text(
+                "function getHash() { return location.hash; }\n"
+                "function setHash(v) { location.hash = v; }\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertFalse(any(f.signature_id == "WP036" for f in result.findings))
+
     def test_scan_file_does_not_flag_gnu_license_text_as_system_call(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
