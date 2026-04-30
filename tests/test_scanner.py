@@ -4,7 +4,13 @@ import os
 import json
 from pathlib import Path
 
-from wp_scanner import FileScanner, SignatureManager, ScanStatus, WordPressCoreVerifier
+from wp_scanner import (
+    FileScanner,
+    SignatureManager,
+    ScanStatus,
+    WordPressCoreVerifier,
+    WordPressExtensionVerifier,
+)
 
 
 class ScannerTests(unittest.TestCase):
@@ -248,6 +254,58 @@ class ScannerTests(unittest.TestCase):
             result = self.scanner.scan_file(scan_root / "wp-includes" / "load.php")
             heuristic_ids = {f.signature_id for f in result.findings}
             self.assertNotIn("H005", heuristic_ids)
+
+    def test_verify_extensions_filters_identical_files_and_skips_bundled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scan_root = root / "scan"
+            cache_root = root / ".wp-scanner-cache"
+
+            # Local plugin files.
+            plugin_dir = scan_root / "wp-content" / "plugins" / "demo-plugin"
+            plugin_dir.mkdir(parents=True, exist_ok=True)
+            plugin_main = plugin_dir / "demo-plugin.php"
+            plugin_main.write_text(
+                "<?php\n"
+                "/*\n"
+                "Plugin Name: Demo Plugin\n"
+                "Version: 1.2.3\n"
+                "*/\n"
+                "echo 'ok';\n",
+                encoding="utf-8",
+            )
+            plugin_extra = plugin_dir / "extra.php"
+            plugin_extra.write_text("<?php echo 'changed';\n", encoding="utf-8")
+
+            # Bundled core plugin-like file should be ignored by extension baseline.
+            bundled_file = scan_root / "wp-content" / "plugins" / "hello.php"
+            bundled_file.write_text("<?php echo 'hello';\n", encoding="utf-8")
+
+            # Cached reference for demo-plugin@1.2.3.
+            ref_root = cache_root / "extensions" / "plugin" / "demo-plugin" / "1.2.3"
+            (ref_root / "demo-plugin").mkdir(parents=True, exist_ok=True)
+            (ref_root / ".ready").write_text("ok", encoding="utf-8")
+            (ref_root / "demo-plugin" / "demo-plugin.php").write_text(
+                "<?php\n"
+                "/*\n"
+                "Plugin Name: Demo Plugin\n"
+                "Version: 1.2.3\n"
+                "*/\n"
+                "echo 'ok';\n",
+                encoding="utf-8",
+            )
+            (ref_root / "demo-plugin" / "extra.php").write_text("<?php echo 'reference';\n", encoding="utf-8")
+
+            verifier = WordPressExtensionVerifier(cache_dir=cache_root, offline=True)
+            ok, _msg = verifier.prepare(scan_root, core_hashes={"wp-content/plugins/hello.php": "dummy"})
+            self.assertTrue(ok)
+
+            files = self.scanner.collect_files(scan_root)
+            filtered, skipped = verifier.filter_identical_extension_files(scan_root, files)
+            filtered_set = set(filtered)
+            self.assertGreaterEqual(skipped, 1)  # unchanged demo-plugin.php skipped
+            self.assertIn(plugin_extra, filtered_set)  # changed file remains for scan
+            self.assertIn(bundled_file, filtered_set)  # bundled file not extension-verified here
 
 
 if __name__ == "__main__":

@@ -1154,6 +1154,219 @@ class WordPressCoreVerifier:
         return 1, local_lines[0] if local_lines else "", ref_lines[0] if ref_lines else ""
 
 
+class WordPressExtensionVerifier:
+    """Verify plugin/theme files against official package baselines when possible."""
+
+    def __init__(self, cache_dir: Path, offline: bool = False):
+        self.cache_dir = cache_dir
+        self.offline = offline
+        self.reference_hashes: Dict[str, str] = {}
+        self.unverifiable_extensions: List[str] = []
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 128), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _plugin_version(plugin_root: Path) -> Optional[str]:
+        php_candidates: List[Path] = []
+        if plugin_root.is_dir():
+            for child in plugin_root.iterdir():
+                if child.is_file() and child.suffix.lower() == ".php":
+                    php_candidates.append(child)
+        elif plugin_root.is_file() and plugin_root.suffix.lower() == ".php":
+            php_candidates.append(plugin_root)
+        for php_file in php_candidates:
+            try:
+                text = php_file.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if "Plugin Name:" not in text:
+                continue
+            match = re.search(r"^\s*\*?\s*Version:\s*([^\r\n]+)$", text, re.MULTILINE | re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        return None
+
+    @staticmethod
+    def _theme_version(theme_root: Path) -> Optional[str]:
+        style_css = theme_root / "style.css"
+        if not style_css.exists():
+            return None
+        try:
+            text = style_css.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return None
+        match = re.search(r"^\s*\*?\s*Version:\s*([^\r\n]+)$", text, re.MULTILINE | re.IGNORECASE)
+        return match.group(1).strip() if match else None
+
+    def _download_and_extract(self, kind: str, slug: str, version: str) -> Optional[Path]:
+        cache_root = self.cache_dir / "extensions" / kind / slug / version
+        marker = cache_root / ".ready"
+        if marker.exists():
+            return cache_root
+        if self.offline:
+            return None
+        url = f"https://downloads.wordpress.org/{kind}/{slug}.{version}.zip"
+        zip_path = self.cache_dir / "downloads" / kind / f"{slug}-{version}.zip"
+        try:
+            zip_path.parent.mkdir(parents=True, exist_ok=True)
+            urllib.request.urlretrieve(url, zip_path)  # nosec: official wordpress downloads URL
+            cache_root.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(cache_root)
+            marker.write_text("ok", encoding="utf-8")
+            return cache_root
+        except Exception:
+            return None
+
+    @staticmethod
+    def _first_real_subdir(path: Path) -> Optional[Path]:
+        dirs = [p for p in path.iterdir() if p.is_dir()]
+        if len(dirs) == 1:
+            return dirs[0]
+        return path if dirs else None
+
+    def _build_reference_for_plugin(self, scan_root: Path, plugin_path: Path) -> None:
+        slug = plugin_path.name if plugin_path.is_dir() else plugin_path.stem
+        version = self._plugin_version(plugin_path)
+        rel_base = f"wp-content/plugins/{slug}"
+        if not version:
+            self.unverifiable_extensions.append(f"plugin:{slug}")
+            return
+        extracted = self._download_and_extract("plugin", slug, version)
+        if not extracted:
+            self.unverifiable_extensions.append(f"plugin:{slug}@{version}")
+            return
+        root = self._first_real_subdir(extracted)
+        if root is None:
+            self.unverifiable_extensions.append(f"plugin:{slug}@{version}")
+            return
+        for walk_root, _dirs, files in os.walk(root):
+            for name in files:
+                ref_path = Path(walk_root) / name
+                rel = ref_path.relative_to(root).as_posix()
+                try:
+                    self.reference_hashes[f"{rel_base}/{rel}"] = self._sha256_file(ref_path)
+                except OSError:
+                    continue
+
+    def _build_reference_for_theme(self, theme_path: Path) -> None:
+        slug = theme_path.name
+        version = self._theme_version(theme_path)
+        rel_base = f"wp-content/themes/{slug}"
+        if not version:
+            self.unverifiable_extensions.append(f"theme:{slug}")
+            return
+        extracted = self._download_and_extract("theme", slug, version)
+        if not extracted:
+            self.unverifiable_extensions.append(f"theme:{slug}@{version}")
+            return
+        root = self._first_real_subdir(extracted)
+        if root is None:
+            self.unverifiable_extensions.append(f"theme:{slug}@{version}")
+            return
+        for walk_root, _dirs, files in os.walk(root):
+            for name in files:
+                ref_path = Path(walk_root) / name
+                rel = ref_path.relative_to(root).as_posix()
+                try:
+                    self.reference_hashes[f"{rel_base}/{rel}"] = self._sha256_file(ref_path)
+                except OSError:
+                    continue
+
+    def prepare(
+        self,
+        scan_root: Path,
+        core_hashes: Optional[Dict[str, str]] = None,
+        progress_cb: Optional[Callable[[str], None]] = None,
+    ) -> Tuple[bool, str]:
+        self.reference_hashes.clear()
+        self.unverifiable_extensions.clear()
+        core_hashes = core_hashes or {}
+        plugins_dir = scan_root / "wp-content" / "plugins"
+        themes_dir = scan_root / "wp-content" / "themes"
+
+        if progress_cb:
+            progress_cb("Collecting plugin/theme extensions for baseline verification...")
+
+        plugin_entries: List[Path] = []
+        if plugins_dir.exists():
+            for entry in plugins_dir.iterdir():
+                if entry.name.startswith("."):
+                    continue
+                rel = entry.relative_to(scan_root).as_posix()
+                if entry.is_dir():
+                    if any((entry / f).exists() and f"{rel}/{f}" in core_hashes for f in ("hello.php", "akismet.php")):
+                        continue
+                    plugin_entries.append(entry)
+                elif entry.is_file() and entry.suffix.lower() == ".php":
+                    if rel in core_hashes:
+                        continue
+                    plugin_entries.append(entry)
+
+        theme_entries: List[Path] = []
+        if themes_dir.exists():
+            for entry in themes_dir.iterdir():
+                if not entry.is_dir() or entry.name.startswith("."):
+                    continue
+                style_rel = f"wp-content/themes/{entry.name}/style.css"
+                if style_rel in core_hashes:
+                    continue
+                theme_entries.append(entry)
+
+        for plugin_path in plugin_entries:
+            if progress_cb:
+                progress_cb(f"Preparing plugin baseline: {plugin_path.name}")
+            self._build_reference_for_plugin(scan_root, plugin_path)
+        for theme_path in theme_entries:
+            if progress_cb:
+                progress_cb(f"Preparing theme baseline: {theme_path.name}")
+            self._build_reference_for_theme(theme_path)
+
+        return True, (
+            f"prepared extension baselines: {len(self.reference_hashes)} files, "
+            f"unverifiable extensions: {len(self.unverifiable_extensions)}"
+        )
+
+    def filter_identical_extension_files(
+        self,
+        scan_root: Path,
+        files: List[Path],
+        progress_cb: Optional[Callable[[str], None]] = None,
+    ) -> Tuple[List[Path], int]:
+        if not self.reference_hashes:
+            return files, 0
+        if progress_cb:
+            progress_cb("Checking local plugin/theme files against extension baselines...")
+        kept: List[Path] = []
+        skipped = 0
+        for path in files:
+            try:
+                rel = path.relative_to(scan_root).as_posix()
+            except ValueError:
+                kept.append(path)
+                continue
+            expected = self.reference_hashes.get(rel)
+            if not expected:
+                kept.append(path)
+                continue
+            try:
+                local_hash = self._sha256_file(path)
+            except OSError:
+                kept.append(path)
+                continue
+            if local_hash == expected:
+                skipped += 1
+            else:
+                kept.append(path)
+        return kept, skipped
+
+
 def _format_duration(seconds: float) -> str:
     seconds = max(0, int(seconds))
     mins, secs = divmod(seconds, 60)
@@ -1529,6 +1742,7 @@ if TEXTUAL_AVAILABLE:
             threads: int,
             audit_log_path: str = "wp-scan-remediation-audit.jsonl",
             core_verifier: Optional[WordPressCoreVerifier] = None,
+            extension_verifier: Optional[WordPressExtensionVerifier] = None,
         ):
             super().__init__()
             self.scanner = scanner
@@ -1536,6 +1750,7 @@ if TEXTUAL_AVAILABLE:
             self.threads = threads
             self.audit_log_path = Path(audit_log_path)
             self.core_verifier = core_verifier
+            self.extension_verifier = extension_verifier
             self.findings_map: Dict[str, Finding] = {}
             self.finding_rows: List[Tuple[str, Finding]] = []
             self.visible_rows: List[Tuple[str, Finding]] = []
@@ -1724,6 +1939,7 @@ if TEXTUAL_AVAILABLE:
             if not self.executor:
                 return
             files = await loop.run_in_executor(self.executor, self.scanner.collect_files, Path(self.scan_path))
+            core_hashes: Dict[str, str] = {}
             if self.core_verifier:
                 def _progress(message: str) -> None:
                     self.call_from_thread(setattr, self, "sub_title", message)
@@ -1743,10 +1959,35 @@ if TEXTUAL_AVAILABLE:
                         files,
                         _progress,
                     )
+                    core_hashes = dict(self.core_verifier.core_hashes)
                     self.sub_title = f"Core baseline active ({self.core_verifier.version}), skipped {skipped} unchanged core files"
                     self._set_status_message("RUNNING", "green")
                 else:
                     self.sub_title = f"Core baseline skipped: {msg}"
+                    self._set_status_message("RUNNING", "green")
+            if self.extension_verifier:
+                def _ext_progress(message: str) -> None:
+                    self.call_from_thread(setattr, self, "sub_title", message)
+                    self.call_from_thread(self._set_status_message, message)
+                ok, msg = await loop.run_in_executor(
+                    self.executor,
+                    self.extension_verifier.prepare,
+                    Path(self.scan_path),
+                    core_hashes,
+                    _ext_progress,
+                )
+                if ok:
+                    files, skipped_ext = await loop.run_in_executor(
+                        self.executor,
+                        self.extension_verifier.filter_identical_extension_files,
+                        Path(self.scan_path),
+                        files,
+                        _ext_progress,
+                    )
+                    self.sub_title = f"Extension baseline active, skipped {skipped_ext} unchanged extension files"
+                    self._set_status_message("RUNNING", "green")
+                else:
+                    self.sub_title = f"Extension baseline skipped: {msg}"
                     self._set_status_message("RUNNING", "green")
             self.total_files = len(files)
             if not files:
@@ -2150,6 +2391,8 @@ def main():
     general.add_argument('--verify-core', action='store_true', help='Pre-verify against official WordPress core and skip unchanged core files')
     general.add_argument('--verify-core-offline', action='store_true', help='Use only cached core baseline data (no network download)')
     general.add_argument('--verify-core-cache', default='.wp-scanner-cache', help='Cache directory for official WordPress core files')
+    general.add_argument('--verify-extensions', action='store_true', help='Pre-verify plugins/themes against extension baselines and skip unchanged files')
+    general.add_argument('--verify-extensions-offline', action='store_true', help='Use only cached extension baseline data (no network download)')
 
     tui_group = parser.add_argument_group("TUI Mode Options")
     tui_group.add_argument('--no-tui', action='store_true', help='Disable TUI and run headless scan')
@@ -2177,10 +2420,16 @@ def main():
         print(f"Loaded {loaded_custom} custom signatures from {args.signatures}")
     scanner = FileScanner(sig_manager.get_all())
     verifier = None
+    extension_verifier = None
     if args.verify_core:
         verifier = WordPressCoreVerifier(
             cache_dir=Path(args.verify_core_cache),
             offline=args.verify_core_offline,
+        )
+    if args.verify_extensions:
+        extension_verifier = WordPressExtensionVerifier(
+            cache_dir=Path(args.verify_core_cache),
+            offline=args.verify_extensions_offline,
         )
 
     if args.no_tui or not TEXTUAL_AVAILABLE:
@@ -2224,13 +2473,25 @@ def main():
         
         scan_root = Path(args.path)
         files = scanner.collect_files(scan_root)
+        core_hashes: Dict[str, str] = {}
         if verifier:
             ok, msg = verifier.prepare(scan_root, progress_cb=print)
             if ok:
                 files, skipped, modified = verifier.filter_identical_core_files(scan_root, files, progress_cb=print)
+                core_hashes = dict(verifier.core_hashes)
                 print(f"Core baseline active (version {verifier.version}); skipped {skipped} unchanged core files.")
             else:
                 print(f"Core baseline skipped: {msg}")
+        if extension_verifier:
+            ok, msg = extension_verifier.prepare(scan_root, core_hashes=core_hashes, progress_cb=print)
+            if ok:
+                files, skipped_ext = extension_verifier.filter_identical_extension_files(scan_root, files, progress_cb=print)
+                print(
+                    f"Extension baseline active; skipped {skipped_ext} unchanged extension files. "
+                    f"Unverifiable extensions: {len(extension_verifier.unverifiable_extensions)}"
+                )
+            else:
+                print(f"Extension baseline skipped: {msg}")
         stats.total_files = len(files)
         
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
@@ -2370,6 +2631,7 @@ def main():
             threads=args.threads,
             audit_log_path=args.audit_log,
             core_verifier=verifier,
+            extension_verifier=extension_verifier,
         )
         app.run()
 
