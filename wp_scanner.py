@@ -1998,7 +1998,7 @@ if TEXTUAL_AVAILABLE:
 
         async def _fetch_remote_snapshot_worker(self) -> None:
             if not self.remote_config:
-                self.call_from_thread(self._start_scan)
+                self._start_scan()
                 return
             collector = RemoteSSHCollector(self.remote_config)
             self.remote_collector = collector
@@ -2013,13 +2013,13 @@ if TEXTUAL_AVAILABLE:
             except Exception as exc:
                 collector.cleanup()
                 self.remote_collector = None
-                self.call_from_thread(self._set_status_message, f"Remote fetch failed: {exc}", "red")
-                self.call_from_thread(lambda: self.query_one("#sort-help", Static).update("Remote fetch failed"))
-                self.call_from_thread(self.bell)
+                self._set_status_message(f"Remote fetch failed: {exc}", "red")
+                self.query_one("#sort-help", Static).update("Remote fetch failed")
+                self.bell()
                 return
             self.scan_path = str(snapshot_path)
-            self.call_from_thread(self._set_status_message, "Remote snapshot ready", "green")
-            self.call_from_thread(self._start_scan)
+            self._set_status_message("Remote snapshot ready", "green")
+            self._start_scan()
 
         def _reset_scan_state(self) -> None:
             self.findings_map.clear()
