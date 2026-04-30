@@ -19,40 +19,42 @@ Use this tool carefully. Quarantine/delete actions can change or remove files. A
 ## Installation
 
 ### pip
-Install from the current directory:
+Install from PyPI:
 
 ```bash
-pip install .
+pip install wp-scanner
 ```
 
-Install with TUI dependencies:
+Install from PyPI with TUI dependencies:
 
 ```bash
 pip install 'wp-scanner[tui]'
 ```
 
-For local editable/testing installs from this repository, use:
+Install from local repository checkout:
 
 ```bash
+pip install .
 pip install '.[tui]'
 ```
 
 ### pipx
-Install as an isolated CLI app:
+Install from PyPI as an isolated CLI app:
 
 ```bash
-pipx install .
+pipx install wp-scanner
 ```
 
-Install with TUI dependencies:
+Install from PyPI with TUI dependencies:
 
 ```bash
 pipx install 'wp-scanner[tui]'
 ```
 
-For local installs from this repository, use:
+Install from local repository checkout:
 
 ```bash
+pipx install .
 pipx install --pip-args='.[tui]' .
 ```
 
