@@ -1733,6 +1733,7 @@ if TEXTUAL_AVAILABLE:
         high_count = reactive(0)
         medium_count = reactive(0)
         low_count = reactive(0)
+        ignored_files = reactive(0)
         sort_label = reactive("severity")
         
         def __init__(
@@ -1818,6 +1819,7 @@ if TEXTUAL_AVAILABLE:
             self.high_count = 0
             self.medium_count = 0
             self.low_count = 0
+            self.ignored_files = 0
             self._paused = False
             self._stopping = False
             self._sorting_active = False
@@ -1959,6 +1961,7 @@ if TEXTUAL_AVAILABLE:
                         files,
                         _progress,
                     )
+                    self.ignored_files += skipped
                     core_hashes = dict(self.core_verifier.core_hashes)
                     self.sub_title = f"Core baseline active ({self.core_verifier.version}), skipped {skipped} unchanged core files"
                     self._set_status_message("RUNNING", "green")
@@ -1984,6 +1987,7 @@ if TEXTUAL_AVAILABLE:
                         files,
                         _ext_progress,
                     )
+                    self.ignored_files += skipped_ext
                     self.sub_title = f"Extension baseline active, skipped {skipped_ext} unchanged extension files"
                     self._set_status_message("RUNNING", "green")
                 else:
@@ -2054,9 +2058,11 @@ if TEXTUAL_AVAILABLE:
                 self.executor = None
         
         def watch_files_scanned(self, val:int): 
-            self.query_one("#files-stat").update(f"Files: {val}/{self.total_files}")
+            self.query_one("#files-stat").update(f"Files: {val}/{self.total_files} ({self.ignored_files} files ignored)")
             if self.total_files > 0:
                 self.query_one(ProgressBar).update(progress=val / self.total_files * 100)
+        def watch_ignored_files(self, val:int):
+            self.query_one("#files-stat").update(f"Files: {self.files_scanned}/{self.total_files} ({val} files ignored)")
         def watch_critical_count(self, val:int): self.query_one("#critical-stat").update(f"[#ff4d4f]Critical: {val}  [/]")
         def watch_high_count(self, val:int): self.query_one("#high-stat").update(f"[#ff9f1a]High: {val}  [/]")
         def watch_medium_count(self, val:int): self.query_one("#medium-stat").update(f"[#ffd166]Medium: {val}  [/]")
@@ -2473,11 +2479,13 @@ def main():
         
         scan_root = Path(args.path)
         files = scanner.collect_files(scan_root)
+        ignored_files = 0
         core_hashes: Dict[str, str] = {}
         if verifier:
             ok, msg = verifier.prepare(scan_root, progress_cb=print)
             if ok:
                 files, skipped, modified = verifier.filter_identical_core_files(scan_root, files, progress_cb=print)
+                ignored_files += skipped
                 core_hashes = dict(verifier.core_hashes)
                 print(f"Core baseline active (version {verifier.version}); skipped {skipped} unchanged core files.")
             else:
@@ -2486,6 +2494,7 @@ def main():
             ok, msg = extension_verifier.prepare(scan_root, core_hashes=core_hashes, progress_cb=print)
             if ok:
                 files, skipped_ext = extension_verifier.filter_identical_extension_files(scan_root, files, progress_cb=print)
+                ignored_files += skipped_ext
                 print(
                     f"Extension baseline active; skipped {skipped_ext} unchanged extension files. "
                     f"Unverifiable extensions: {len(extension_verifier.unverifiable_extensions)}"
@@ -2519,7 +2528,7 @@ def main():
                 remaining = stats.total_files - processed
                 eta_seconds = (remaining / rate) if rate > 0 else 0
                 sys.stdout.write(
-                    f"\rScanning... {progress:.2f}% ({processed}/{stats.total_files}) "
+                    f"\rScanning... {progress:.2f}% ({processed}/{stats.total_files}) ({ignored_files} files ignored) "
                     f"ETA: {_format_duration(eta_seconds)}"
                 )
                 sys.stdout.flush()
