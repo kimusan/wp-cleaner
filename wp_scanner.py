@@ -1400,6 +1400,8 @@ if TEXTUAL_AVAILABLE:
             ("k", "cursor_up", "Up"),
             ("r", "stop_restart", "Stop/Restart"),
             ("e", "export_results", "Export"),
+            ("space", "toggle_selected", "Select"),
+            ("a", "toggle_select_all_visible", "Select All"),
             ("x", "quarantine_selected", "Quarantine"),
             ("delete", "delete_selected", "Delete"),
             ("u", "restore_selected", "Restore"),
@@ -1476,6 +1478,7 @@ if TEXTUAL_AVAILABLE:
             self.findings_map: Dict[str, Finding] = {}
             self.finding_rows: List[Tuple[str, Finding]] = []
             self.visible_rows: List[Tuple[str, Finding]] = []
+            self.selected_keys: Set[str] = set()
             self.scan_complete = False
             self.scan_running = False
             self.executor: Optional[ThreadPoolExecutor] = None
@@ -1512,7 +1515,7 @@ if TEXTUAL_AVAILABLE:
                             yield Button("Export", id="action-export")
                             yield Button("Quarantine Selected", id="action-quarantine")
                             yield Button("Delete Selected", id="action-delete")
-                            yield Button("Restore Selected", id="action-restore")
+                            yield Button("Restore", id="action-restore")
                     with Container(id="logo-panel"):
                         yield Static(Text(self.LOGO, no_wrap=True, overflow="crop"), id="logo")
                 yield Static("Status: RUNNING", id="scan-state")
@@ -1523,7 +1526,7 @@ if TEXTUAL_AVAILABLE:
 
         def on_mount(self) -> None:
             table = self.query_one(DataTable)
-            table.add_columns("Level", "File", "Threat", "Line")
+            table.add_columns("Sel", "Level", "File", "Threat", "Line")
             table.cursor_type = "row"
             table.focus()
             self._start_scan()
@@ -1532,6 +1535,7 @@ if TEXTUAL_AVAILABLE:
             self.findings_map.clear()
             self.finding_rows.clear()
             self.visible_rows.clear()
+            self.selected_keys.clear()
             self.total_files = 0
             self.files_scanned = 0
             self.critical_count = 0
@@ -1593,7 +1597,9 @@ if TEXTUAL_AVAILABLE:
                 rows = [(k, f) for k, f in rows if f.threat_level == selected_filter]
             self.visible_rows = rows
             for key, finding in self.visible_rows:
+                mark = "[green]☑[/]" if key in self.selected_keys else "☐"
                 table.add_row(
+                    mark,
                     self._severity_markup(finding),
                     Path(finding.file_path).name,
                     finding.signature_name,
@@ -1628,7 +1634,9 @@ if TEXTUAL_AVAILABLE:
                 return
             self.visible_rows.append((key, finding))
             table = self.query_one(DataTable)
+            mark = "[green]☑[/]" if key in self.selected_keys else "☐"
             table.add_row(
+                mark,
                 self._severity_markup(finding),
                 Path(finding.file_path).name,
                 finding.signature_name,
@@ -1841,25 +1849,70 @@ if TEXTUAL_AVAILABLE:
             return finding
 
         def _drop_file_findings(self, file_path: str) -> None:
+            removed = {k for k, f in self.finding_rows if f.file_path == file_path}
+            self.selected_keys -= removed
             self.finding_rows = [(k, f) for k, f in self.finding_rows if f.file_path != file_path]
             self.visible_rows = [(k, f) for k, f in self.visible_rows if f.file_path != file_path]
             self.findings_map = {k: f for k, f in self.findings_map.items() if f.file_path != file_path}
             self._refresh_table()
 
-        def _confirm_and_run(self, action: str, finding: Finding) -> None:
-            label = "Quarantine selected file?" if action == "quarantine" else "Delete selected file?"
+        def _selected_findings(self) -> List[Finding]:
+            if self.selected_keys:
+                return [f for k, f in self.finding_rows if k in self.selected_keys]
+            finding = self._selected_finding()
+            return [finding] if finding else []
+
+        def action_toggle_selected(self) -> None:
+            if not self.scan_complete:
+                self.bell()
+                return
+            table = self.query_one(DataTable)
+            if table.row_count == 0:
+                self.bell()
+                return
+            row_index = table.cursor_coordinate.row
+            if row_index < 0 or row_index >= len(self.visible_rows):
+                self.bell()
+                return
+            key, _finding = self.visible_rows[row_index]
+            if key in self.selected_keys:
+                self.selected_keys.remove(key)
+            else:
+                self.selected_keys.add(key)
+            self._refresh_table()
+
+        def action_toggle_select_all_visible(self) -> None:
+            if not self.scan_complete:
+                self.bell()
+                return
+            keys = {k for k, _ in self.visible_rows}
+            if not keys:
+                self.bell()
+                return
+            if keys.issubset(self.selected_keys):
+                self.selected_keys -= keys
+            else:
+                self.selected_keys |= keys
+            self._refresh_table()
+
+        def _confirm_and_run(self, action: str, findings: List[Finding]) -> None:
+            targets = sorted({f.file_path for f in findings})
+            label = f"Quarantine {len(targets)} file(s)?" if action == "quarantine" else f"Delete {len(targets)} file(s)?"
+            preview = "\n".join(targets[:8])
+            if len(targets) > 8:
+                preview += f"\n... and {len(targets) - 8} more"
 
             def _after(confirm: bool) -> None:
                 if not confirm:
                     self.query_one("#sort-help", Static).update(f"{action.capitalize()} cancelled")
                     return
-                src = Path(finding.file_path)
-                if not src.exists():
-                    self.query_one("#sort-help", Static).update("Target file no longer exists")
+                paths = [Path(p) for p in targets if Path(p).exists()]
+                if not paths:
+                    self.query_one("#sort-help", Static).update("Selected target files no longer exist")
                     self.bell()
                     return
                 if action == "quarantine":
-                    moved, failed, records = _apply_quarantine([src], Path("quarantine"))
+                    moved, failed, records = _apply_quarantine(paths, Path("quarantine"))
                     self.query_one("#sort-help", Static).update(f"Quarantine complete: moved={moved}, failed={failed}")
                     for rec in records:
                         _append_audit_log(
@@ -1876,42 +1929,47 @@ if TEXTUAL_AVAILABLE:
                             },
                         )
                     if moved:
-                        self._drop_file_findings(finding.file_path)
+                        for rec in records:
+                            if rec.get("result") == "success":
+                                self._drop_file_findings(rec["target"])
                 else:
-                    deleted, failed = _apply_delete([src])
+                    deleted, failed = _apply_delete(paths)
                     self.query_one("#sort-help", Static).update(f"Delete complete: deleted={deleted}, failed={failed}")
-                    _append_audit_log(
-                        self.audit_log_path,
-                        mode="tui",
-                        action="delete",
-                        target=finding.file_path,
-                        result="success" if deleted else "failed",
-                        details={"deleted": deleted, "failed": failed},
-                    )
+                    result_state = "success" if failed == 0 and deleted > 0 else "partial" if deleted > 0 else "failed"
+                    for path in paths:
+                        _append_audit_log(
+                            self.audit_log_path,
+                            mode="tui",
+                            action="delete",
+                            target=str(path),
+                            result=result_state,
+                            details={"deleted": deleted, "failed": failed},
+                        )
                     if deleted:
-                        self._drop_file_findings(finding.file_path)
+                        for path in paths:
+                            self._drop_file_findings(str(path))
 
-            self.push_screen(ConfirmActionScreen(label, finding.file_path), _after)
+            self.push_screen(ConfirmActionScreen(label, preview), _after)
 
         def action_quarantine_selected(self) -> None:
             if not self.scan_complete:
                 self.bell()
                 return
-            finding = self._selected_finding()
-            if not finding:
+            findings = self._selected_findings()
+            if not findings:
                 self.bell()
                 return
-            self._confirm_and_run("quarantine", finding)
+            self._confirm_and_run("quarantine", findings)
 
         def action_delete_selected(self) -> None:
             if not self.scan_complete:
                 self.bell()
                 return
-            finding = self._selected_finding()
-            if not finding:
+            findings = self._selected_findings()
+            if not findings:
                 self.bell()
                 return
-            self._confirm_and_run("delete", finding)
+            self._confirm_and_run("delete", findings)
 
         def action_restore_selected(self) -> None:
             if not self.scan_complete:
