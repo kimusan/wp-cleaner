@@ -290,6 +290,48 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(result.status, ScanStatus.COMPLETED.value)
             self.assertFalse(any(f.signature_id in {"WP116", "WP117", "WP118"} for f in result.findings))
 
+    def test_scan_file_detects_dropper_write_uploads_php(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "dropper.php"
+            target.write_text(
+                "<?php\n"
+                "file_put_contents('/var/www/html/wp-content/uploads/shell.php', $payload);\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP119" for f in result.findings))
+
+    def test_scan_file_detects_move_uploaded_file_php_drop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "uploader.php"
+            target.write_text(
+                "<?php\n"
+                "move_uploaded_file($_FILES['f']['tmp_name'], '/var/www/html/wp-content/cache/r.php');\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP120" for f in result.findings))
+
+    def test_scan_file_does_not_flag_benign_upload_move_non_php(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "image-upload.php"
+            target.write_text(
+                "<?php\n"
+                "move_uploaded_file($_FILES['f']['tmp_name'], '/var/www/html/wp-content/uploads/pic.jpg');\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertFalse(any(f.signature_id in {'WP119', 'WP120', 'WP121'} for f in result.findings))
+
     def test_scan_file_deduplicates_and_caps_noisy_matches(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
