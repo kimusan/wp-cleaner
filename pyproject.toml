@@ -7,7 +7,7 @@ name = "wp-scanner"
 version = "1.0.0"
 description = "WordPress malware scanner with headless and Textual TUI modes"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [
   { name = "Kim Schulz", email = "kim@schulz.dk" }
