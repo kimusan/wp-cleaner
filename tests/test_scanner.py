@@ -136,6 +136,19 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(result.status, ScanStatus.COMPLETED.value)
             self.assertFalse(any(f.signature_id == "WP036" for f in result.findings))
 
+    def test_scan_file_does_not_flag_gnu_license_text_as_system_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "license.txt"
+            target.write_text(
+                "The GNU operating system (GNU/Linux) is free software.\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertFalse(any(f.signature_id == "WP026" for f in result.findings))
+
     def test_collect_files_skips_git_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

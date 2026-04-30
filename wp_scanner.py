@@ -182,7 +182,7 @@ def get_builtin_signatures() -> List[Signature]:
         Signature("WP023", "Preg Replace Eval", r'preg_replace\s*\([^)]*\/e[^)]*\)', "Preg_replace with /e modifier - code execution", ThreatLevel.HIGH, "injection", "Remove or replace with preg_replace_callback"),
         Signature("WP024", "Create Function", r'create_function\s*\(', "create_function - arbitrary code execution", ThreatLevel.HIGH, "backdoor", "Replace with anonymous function or remove"),
         Signature("WP025", "Shell Exec", r'shell_exec\s*\(', "Shell execution function", ThreatLevel.CRITICAL, "backdoor", "Remove unless legitimately needed"),
-        Signature("WP026", "System Call", r'\bsystem\s*\(', "System call - command execution", ThreatLevel.CRITICAL, "backdoor", "Remove unless legitimately needed"),
+        Signature("WP026", "System Call", r'\bsystem\s*\(\s*[^)]{0,500}\)\s*;', "System call - command execution", ThreatLevel.CRITICAL, "backdoor", "Remove unless legitimately needed"),
         Signature("WP027", "Passthru", r'passthru\s*\(', "Passthru - command execution", ThreatLevel.CRITICAL, "backdoor", "Remove unless legitimately needed"),
         Signature("WP028", "Proc Open", r'proc_open\s*\(', "Process opening - command execution", ThreatLevel.CRITICAL, "backdoor", "Remove unless legitimately needed"),
         Signature("WP029", "Pcntl Exec", r'pcntl_exec\s*\(', "Process control execution", ThreatLevel.CRITICAL, "backdoor", "Remove unless legitimately needed"),
