@@ -1847,6 +1847,9 @@ if TEXTUAL_AVAILABLE:
             self.audit_log_path = Path(audit_log_path)
             self.core_verifier = core_verifier
             self.extension_verifier = extension_verifier
+            self.signature_target_types: Dict[str, str] = {
+                sig.id: (sig.target_type or "all") for sig in self.scanner.signatures
+            }
             self.findings_map: Dict[str, Finding] = {}
             self.finding_rows: List[Tuple[str, Finding]] = []
             self.visible_rows: List[Tuple[str, Finding]] = []
@@ -2227,11 +2230,13 @@ if TEXTUAL_AVAILABLE:
 
             rows = []
             for _, finding in self.finding_rows:
+                target_type = self.signature_target_types.get(finding.signature_id, "all")
                 rows.append(
                     {
                         "file_path": finding.file_path,
                         "line_number": finding.line_number,
                         "signature_id": finding.signature_id,
+                        "target_type": target_type,
                         "signature_name": finding.signature_name,
                         "threat_level": finding.threat_level,
                         "category": finding.category,
