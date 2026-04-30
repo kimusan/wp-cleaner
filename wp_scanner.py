@@ -408,6 +408,13 @@ class FileScanner:
     SKIP_DIRS = {'.git', '.svn', '.hg', 'node_modules', '__pycache__', '.idea', '.vscode', '.DS_Store'}
     MAX_MATCHES_PER_SIGNATURE_PER_FILE = 25
     HEURISTIC_LONG_TOKEN_RE = re.compile(r"[A-Za-z0-9+/=]{180,}")
+    SIGNATURE_GUARDS: Dict[str, Dict[str, Set[str]]] = {
+        "WP122": {"names": {".htaccess"}},
+        "WP123": {"names": {".htaccess"}},
+        "WP125": {"suffixes": {".js"}},
+        "WP126": {"suffixes": {".js"}},
+        "WP127": {"suffixes": {".js"}},
+    }
 
     def __init__(self, signatures: List[Signature]):
         self.signatures = signatures
@@ -435,6 +442,18 @@ class FileScanner:
             if filepath.stat().st_size > 2 * 1024 * 1024:  # 2MB limit
                 return False
         except OSError:
+            return False
+        return True
+
+    def _signature_allowed_for_file(self, sig_id: str, filepath: Path) -> bool:
+        guard = self.SIGNATURE_GUARDS.get(sig_id)
+        if not guard:
+            return True
+        suffixes = guard.get("suffixes", set())
+        names = guard.get("names", set())
+        if suffixes and filepath.suffix.lower() not in suffixes:
+            return False
+        if names and filepath.name.lower() not in names:
             return False
         return True
 
@@ -575,6 +594,8 @@ class FileScanner:
                     line_starts.append(idx + 1)
             
             for sig, pattern in self.compiled_patterns:
+                if not self._signature_allowed_for_file(sig.id, filepath):
+                    continue
                 signature_match_counts.setdefault(sig.id, 0)
                 for match in pattern.finditer(content):
                     if signature_match_counts[sig.id] >= self.MAX_MATCHES_PER_SIGNATURE_PER_FILE:
