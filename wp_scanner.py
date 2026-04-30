@@ -408,6 +408,17 @@ class FileScanner:
     SKIP_DIRS = {'.git', '.svn', '.hg', 'node_modules', '__pycache__', '.idea', '.vscode', '.DS_Store'}
     MAX_MATCHES_PER_SIGNATURE_PER_FILE = 25
     HEURISTIC_LONG_TOKEN_RE = re.compile(r"[A-Za-z0-9+/=]{180,}")
+    PHP_FILE_SUFFIXES = {".php", ".phtml", ".php5", ".php7", ".inc"}
+    PHP_SIGNATURE_IDS = {
+        "WP004", "WP007", "WP008", "WP009", "WP010", "WP011", "WP014", "WP015",
+        "WP020", "WP021", "WP022", "WP023", "WP024", "WP025", "WP026", "WP027",
+        "WP028", "WP029", "WP043", "WP046", "WP047", "WP050", "WP058", "WP059",
+        "WP060", "WP062", "WP063", "WP075", "WP076", "WP077", "WP078", "WP079",
+        "WP080", "WP083", "WP084", "WP091", "WP095", "WP101", "WP102", "WP103",
+        "WP104", "WP105", "WP106", "WP107", "WP108", "WP111", "WP112", "WP113",
+        "WP114", "WP115", "WP116", "WP117", "WP118", "WP119", "WP120", "WP121",
+        "WP124",
+    }
     SIGNATURE_GUARDS: Dict[str, Dict[str, Set[str]]] = {
         "WP122": {"names": {".htaccess"}},
         "WP123": {"names": {".htaccess"}},
@@ -446,6 +457,8 @@ class FileScanner:
         return True
 
     def _signature_allowed_for_file(self, sig_id: str, filepath: Path) -> bool:
+        if sig_id in self.PHP_SIGNATURE_IDS and filepath.suffix.lower() not in self.PHP_FILE_SUFFIXES:
+            return False
         guard = self.SIGNATURE_GUARDS.get(sig_id)
         if not guard:
             return True

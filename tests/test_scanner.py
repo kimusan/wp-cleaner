@@ -148,6 +148,19 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(result.status, ScanStatus.COMPLETED.value)
             self.assertTrue(any(f.signature_id == "WP103" for f in result.findings))
 
+    def test_scan_file_does_not_apply_php_exec_signature_to_js(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "script.js"
+            target.write_text(
+                "function x(){ assert($_REQUEST['cmd']); }\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertFalse(any(f.signature_id == "WP103" for f in result.findings))
+
     def test_scan_file_detects_multi_decode_chain(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
