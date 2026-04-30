@@ -302,6 +302,8 @@ def get_builtin_signatures() -> List[Signature]:
         Signature("WP108", "Chr Array Builder", r'array_map\s*\(\s*[\'"]chr[\'"]\s*,\s*array\s*\(', "Character array builder used to reconstruct hidden payload strings", ThreatLevel.HIGH, "obfuscation", "Reconstruct output string and inspect downstream execution usage"),
         Signature("WP109", "Eval Unescape", r'eval\s*\(\s*unescape\s*\(', "Eval + unescape chain in script content", ThreatLevel.HIGH, "obfuscation", "Decode escaped payload and remove unsafe runtime evaluation"),
         Signature("WP110", "Function Atob Constructor", r'new\s+Function\s*\(\s*atob\s*\(', "Dynamic Function constructor with base64 decoding", ThreatLevel.HIGH, "obfuscation", "Decode function body and remove dynamic code construction"),
+        Signature("WP111", "Cron Callback Execution", r'wp_schedule_event\s*\([\s\S]{0,400}?(?:eval|assert|base64_decode|gzinflate)', "Suspicious cron registration with execution/obfuscation callbacks", ThreatLevel.HIGH, "persistence", "Review cron callback implementation and remove unauthorized scheduled payloads"),
+        Signature("WP112", "Disable Functions Tampering", r'ini_set\s*\(\s*[\x27\"]disable_functions[\x27\"]\s*,', "Runtime tampering of disabled_functions", ThreatLevel.HIGH, "evasion", "Remove runtime security-control tampering and audit surrounding code paths"),
     ]
 
 # =============================================================================

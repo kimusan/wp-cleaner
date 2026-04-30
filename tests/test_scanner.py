@@ -176,6 +176,34 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(result.status, ScanStatus.COMPLETED.value)
             self.assertTrue(any(f.signature_id == "WP108" for f in result.findings))
 
+    def test_scan_file_detects_suspicious_cron_callback_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "cron.php"
+            target.write_text(
+                "<?php\n"
+                "wp_schedule_event(time(), 'hourly', eval(base64_decode($payload)));\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP111" for f in result.findings))
+
+    def test_scan_file_detects_disable_functions_tampering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "env.php"
+            target.write_text(
+                "<?php\n"
+                "ini_set('disable_functions', '');\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP112" for f in result.findings))
+
     def test_scan_file_deduplicates_and_caps_noisy_matches(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
