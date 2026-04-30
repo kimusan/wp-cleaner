@@ -10,6 +10,9 @@ from wp_scanner import (
     ScanStatus,
     WordPressCoreVerifier,
     WordPressExtensionVerifier,
+    parse_remote_ssh_target,
+    RemoteSSHConfig,
+    RemoteSSHCollector,
 )
 
 
@@ -112,6 +115,34 @@ class ScannerTests(unittest.TestCase):
             self.assertIn("WP021", sig_ids)
             wp021 = next(sig for sig in reloaded.get_all() if sig.id == "WP021")
             self.assertEqual(wp021.target_type, "php")
+
+    def test_parse_remote_ssh_target_user_host_path(self):
+        host, path = parse_remote_ssh_target("user@example.com:/var/www/html")
+        self.assertEqual(host, "user@example.com")
+        self.assertEqual(path, "/var/www/html")
+
+    def test_parse_remote_ssh_target_ssh_uri(self):
+        host, path = parse_remote_ssh_target("ssh://user@example.com/var/www/html")
+        self.assertEqual(host, "user@example.com")
+        self.assertEqual(path, "/var/www/html")
+
+    def test_remote_ssh_collector_builds_secure_base_command(self):
+        cfg = RemoteSSHConfig(
+            host_target="user@example.com",
+            remote_path="/var/www/html",
+            port=2222,
+            key_file="/tmp/id_rsa",
+            known_hosts="/tmp/known_hosts",
+            strict_host_key_checking=True,
+        )
+        collector = RemoteSSHCollector(cfg)
+        cmd = collector._build_ssh_base_command()
+        self.assertIn("-p", cmd)
+        self.assertIn("2222", cmd)
+        self.assertIn("-i", cmd)
+        self.assertIn("/tmp/id_rsa", cmd)
+        self.assertIn("StrictHostKeyChecking=yes", " ".join(cmd))
+        self.assertIn("UserKnownHostsFile=/tmp/known_hosts", " ".join(cmd))
 
     def test_custom_js_target_type_does_not_match_php(self):
         with tempfile.TemporaryDirectory() as tmp:

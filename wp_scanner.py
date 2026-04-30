@@ -20,18 +20,23 @@ import shutil
 import getpass
 import hashlib
 import zipfile
+import tarfile
+import tempfile
 import urllib.request
 import urllib.error
 import asyncio
 import argparse
 import logging
 import time
+import shlex
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Callable, Set
 from enum import Enum
+from urllib.parse import urlparse
 
 try:
     from textual.app import App, ComposeResult
@@ -2508,6 +2513,100 @@ if TEXTUAL_AVAILABLE:
             self.push_screen(FindingDetailScreen(finding))
 
 # =============================================================================
+# REMOTE SSH SNAPSHOT
+# =============================================================================
+
+def parse_remote_ssh_target(value: str) -> Tuple[str, str]:
+    raw = (value or "").strip()
+    if not raw:
+        raise ValueError("remote SSH target is empty")
+    if raw.startswith("ssh://"):
+        parsed = urlparse(raw)
+        if not parsed.hostname:
+            raise ValueError("remote SSH target must include a host")
+        remote_path = parsed.path or "/"
+        user = parsed.username
+        host = parsed.hostname
+        host_target = f"{user}@{host}" if user else host
+        return host_target, remote_path
+    if ":" not in raw:
+        raise ValueError("remote SSH target must be in form user@host:/path or ssh://user@host/path")
+    host_target, remote_path = raw.split(":", 1)
+    host_target = host_target.strip()
+    remote_path = remote_path.strip()
+    if not host_target:
+        raise ValueError("remote SSH target missing host")
+    if not remote_path:
+        raise ValueError("remote SSH target missing remote path")
+    return host_target, remote_path
+
+
+@dataclass
+class RemoteSSHConfig:
+    host_target: str
+    remote_path: str
+    port: int = 22
+    key_file: str = ""
+    known_hosts: str = ""
+    strict_host_key_checking: bool = True
+
+
+class RemoteSSHCollector:
+    def __init__(self, config: RemoteSSHConfig):
+        self.config = config
+        self.work_dir: Optional[Path] = None
+
+    def _build_ssh_base_command(self) -> List[str]:
+        cmd = ["ssh", "-p", str(self.config.port)]
+        if self.config.key_file:
+            cmd.extend(["-i", self.config.key_file])
+        if self.config.strict_host_key_checking:
+            cmd.extend(["-o", "StrictHostKeyChecking=yes"])
+        else:
+            cmd.extend(["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"])
+        if self.config.known_hosts:
+            cmd.extend(["-o", f"UserKnownHostsFile={self.config.known_hosts}"])
+        return cmd
+
+    @staticmethod
+    def _safe_extract_tar(archive: Path, destination: Path) -> None:
+        destination = destination.resolve()
+        with tarfile.open(archive, "r:*") as tf:
+            for member in tf.getmembers():
+                member_path = (destination / member.name).resolve()
+                if not str(member_path).startswith(str(destination)):
+                    raise RuntimeError(f"unsafe path in remote archive: {member.name}")
+            tf.extractall(destination)
+
+    def fetch_snapshot(self, progress_cb: Optional[Callable[[str], None]] = None) -> Path:
+        if progress_cb:
+            progress_cb(f"Connecting to {self.config.host_target} via SSH...")
+        self.work_dir = Path(tempfile.mkdtemp(prefix="wp-scanner-remote-"))
+        archive_path = self.work_dir / "remote.tar"
+        snapshot_dir = self.work_dir / "snapshot"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+        ssh_cmd = self._build_ssh_base_command()
+        remote_cmd = f"tar -C {shlex.quote(self.config.remote_path)} -cf - ."
+        cmd = ssh_cmd + [self.config.host_target, remote_cmd]
+        if progress_cb:
+            progress_cb(f"Fetching remote files from {self.config.remote_path}...")
+        with open(archive_path, "wb") as out:
+            proc = subprocess.run(cmd, stdout=out, stderr=subprocess.PIPE, check=False)
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode("utf-8", errors="ignore").strip()
+            raise RuntimeError(f"SSH fetch failed: {stderr or f'exit code {proc.returncode}'}")
+        if progress_cb:
+            progress_cb("Extracting remote snapshot...")
+        self._safe_extract_tar(archive_path, snapshot_dir)
+        return snapshot_dir
+
+    def cleanup(self) -> None:
+        if self.work_dir and self.work_dir.exists():
+            shutil.rmtree(self.work_dir, ignore_errors=True)
+        self.work_dir = None
+
+# =============================================================================
 # MAIN
 # =============================================================================
 def main():
@@ -2523,6 +2622,12 @@ def main():
     general.add_argument('--verify-core-cache', default='.wp-scanner-cache', help='Cache directory for official WordPress core files')
     general.add_argument('--verify-extensions', action='store_true', help='Pre-verify plugins/themes against extension baselines and skip unchanged files')
     general.add_argument('--verify-extensions-offline', action='store_true', help='Use only cached extension baseline data (no network download)')
+    remote_group = parser.add_argument_group("Remote Scan Options")
+    remote_group.add_argument('--remote-ssh', default='', help='Remote SSH target: user@host:/path or ssh://user@host/path')
+    remote_group.add_argument('--remote-port', type=int, default=22, help='SSH port for --remote-ssh')
+    remote_group.add_argument('--remote-key', default='', help='SSH private key file for --remote-ssh')
+    remote_group.add_argument('--remote-known-hosts', default='', help='Known hosts file path for SSH host key verification')
+    remote_group.add_argument('--remote-insecure-host-key', action='store_true', help='Disable SSH host key verification (not recommended)')
 
     tui_group = parser.add_argument_group("TUI Mode Options")
     tui_group.add_argument('--no-tui', action='store_true', help='Disable TUI and run headless scan')
@@ -2542,6 +2647,8 @@ def main():
     selected_actions = sum(bool(x) for x in (args.quarantine, args.delete, args.restore))
     if selected_actions > 1:
         parser.error("--quarantine, --delete and --restore are mutually exclusive")
+    if args.remote_ssh and args.restore:
+        parser.error("--restore operates on local audit/quarantine files and cannot be combined with --remote-ssh")
 
     sig_manager = SignatureManager(custom_signature_file=args.signatures or None)
     sig_manager.load_builtin()
@@ -2552,6 +2659,31 @@ def main():
         exported = sig_manager.export_to_file(args.export_signatures)
         print(f"Exported {exported} signatures to {args.export_signatures}")
         return
+
+    scan_path = args.path
+    remote_collector: Optional[RemoteSSHCollector] = None
+    if args.remote_ssh:
+        host_target, remote_path = parse_remote_ssh_target(args.remote_ssh)
+        config = RemoteSSHConfig(
+            host_target=host_target,
+            remote_path=remote_path,
+            port=args.remote_port,
+            key_file=args.remote_key,
+            known_hosts=args.remote_known_hosts,
+            strict_host_key_checking=not args.remote_insecure_host_key,
+        )
+        remote_collector = RemoteSSHCollector(config)
+        try:
+            print(f"Preparing remote snapshot from {host_target}:{remote_path} ...")
+            snapshot_path = remote_collector.fetch_snapshot(progress_cb=print)
+            scan_path = str(snapshot_path)
+            print(f"Remote snapshot ready: {scan_path}")
+        except Exception as exc:
+            if remote_collector:
+                remote_collector.cleanup()
+            print(f"Remote scan preparation failed: {exc}")
+            sys.exit(1)
+
     scanner = FileScanner(sig_manager.get_all())
     verifier = None
     extension_verifier = None
@@ -2600,12 +2732,12 @@ def main():
                 )
             return
         
-        print(f"Scanning {args.path}...")
+        print(f"Scanning {scan_path}...")
         start_time = time.time()
         stats = ScanStats()
         results = []
         
-        scan_root = Path(args.path)
+        scan_root = Path(scan_path)
         files = scanner.collect_files(scan_root)
         ignored_files = 0
         core_hashes: Dict[str, str] = {}
@@ -2766,13 +2898,15 @@ def main():
             print("Note: --quarantine/--delete are only available in headless mode (--no-tui).")
         app = ScannerTUI(
             scanner=scanner,
-            scan_path=args.path,
+            scan_path=scan_path,
             threads=args.threads,
             audit_log_path=args.audit_log,
             core_verifier=verifier,
             extension_verifier=extension_verifier,
         )
         app.run()
+    if remote_collector:
+        remote_collector.cleanup()
 
 if __name__ == '__main__':
     main()
