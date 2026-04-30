@@ -2671,7 +2671,98 @@ class RemoteSSHCollector:
             cmd.extend(["-o", f"UserKnownHostsFile={self.config.known_hosts}"])
         return cmd
 
-    def _run_ssh_with_password(self, cmd: List[str], archive_path: Path) -> Tuple[int, str]:
+    def _probe_remote_size(self) -> Optional[int]:
+        ssh_cmd = self._build_ssh_base_command()
+        remote_cmd = f"du -sb {shlex.quote(self.config.remote_path)} | awk '{{print $1}}'"
+        env = os.environ.copy()
+        if self.config.password:
+            if not self.work_dir:
+                return None
+            askpass_script = self.work_dir / "askpass.sh"
+            askpass_script.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$WP_SCANNER_SSH_PASSWORD\"\n",
+                encoding="utf-8",
+            )
+            askpass_script.chmod(0o700)
+            env["SSH_ASKPASS"] = str(askpass_script)
+            env["SSH_ASKPASS_REQUIRE"] = "force"
+            env["DISPLAY"] = "wp-scanner:0"
+            env["WP_SCANNER_SSH_PASSWORD"] = self.config.password
+            cmd = ["setsid"] + ssh_cmd + [self.config.host_target, remote_cmd]
+            proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, check=False)
+        else:
+            cmd = ssh_cmd + [self.config.host_target, remote_cmd]
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if proc.returncode != 0:
+            return None
+        out = proc.stdout.decode("utf-8", errors="ignore").strip()
+        if not out.isdigit():
+            return None
+        try:
+            value = int(out)
+        except ValueError:
+            return None
+        return value if value > 0 else None
+
+    @staticmethod
+    def _format_transfer_progress(transferred: int, total: Optional[int], elapsed: float) -> str:
+        mib = transferred / (1024 * 1024)
+        rate = (transferred / elapsed) if elapsed > 0 else 0.0
+        rate_mib = rate / (1024 * 1024)
+        if total and total > 0:
+            pct = min(100.0, (transferred / total) * 100.0)
+            remaining = max(0, total - transferred)
+            eta = (remaining / rate) if rate > 0 else 0
+            return f"Fetching remote files... {mib:.1f} MiB / {total/(1024*1024):.1f} MiB ({pct:.1f}%) at {rate_mib:.1f} MiB/s ETA {_format_duration(eta)}"
+        return f"Fetching remote files... {mib:.1f} MiB transferred at {rate_mib:.1f} MiB/s"
+
+    def _stream_archive(
+        self,
+        cmd: List[str],
+        archive_path: Path,
+        env: Optional[Dict[str, str]] = None,
+        progress_cb: Optional[Callable[[str], None]] = None,
+    ) -> Tuple[int, str]:
+        chunk_size = 1024 * 128
+        transferred = 0
+        started = time.time()
+        last_update = 0.0
+        total_bytes = self._probe_remote_size()
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            close_fds=True,
+        )
+        with open(archive_path, "wb") as out:
+            assert proc.stdout is not None
+            while True:
+                chunk = proc.stdout.read(chunk_size)
+                if not chunk:
+                    break
+                out.write(chunk)
+                transferred += len(chunk)
+                now = time.time()
+                if progress_cb and (now - last_update >= 0.5):
+                    progress_cb(self._format_transfer_progress(transferred, total_bytes, max(0.001, now - started)))
+                    last_update = now
+        stderr_data = b""
+        if proc.stderr is not None:
+            stderr_data = proc.stderr.read() or b""
+        returncode = proc.wait()
+        if progress_cb and transferred > 0:
+            progress_cb(self._format_transfer_progress(transferred, total_bytes, max(0.001, time.time() - started)))
+        return returncode, stderr_data.decode("utf-8", errors="ignore")
+
+    def _run_ssh_with_password(
+        self,
+        cmd: List[str],
+        archive_path: Path,
+        progress_cb: Optional[Callable[[str], None]] = None,
+    ) -> Tuple[int, str]:
         if not self.work_dir:
             raise RuntimeError("internal error: remote work_dir not initialized")
         askpass_script = self.work_dir / "askpass.sh"
@@ -2687,16 +2778,7 @@ class RemoteSSHCollector:
         env["DISPLAY"] = "wp-scanner:0"
         env["WP_SCANNER_SSH_PASSWORD"] = self.config.password
         full_cmd = ["setsid"] + cmd
-        with open(archive_path, "wb") as out:
-            proc = subprocess.run(
-                full_cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=out,
-                stderr=subprocess.PIPE,
-                env=env,
-                check=False,
-            )
-        return proc.returncode, proc.stderr.decode("utf-8", errors="ignore")
+        return self._stream_archive(full_cmd, archive_path, env=env, progress_cb=progress_cb)
 
     @staticmethod
     def _safe_extract_tar(archive: Path, destination: Path) -> None:
@@ -2722,12 +2804,9 @@ class RemoteSSHCollector:
         if progress_cb:
             progress_cb(f"Fetching remote files from {self.config.remote_path}...")
         if self.config.password:
-            returncode, stderr = self._run_ssh_with_password(cmd, archive_path)
+            returncode, stderr = self._run_ssh_with_password(cmd, archive_path, progress_cb=progress_cb)
         else:
-            with open(archive_path, "wb") as out:
-                proc = subprocess.run(cmd, stdout=out, stderr=subprocess.PIPE, check=False)
-            returncode = proc.returncode
-            stderr = proc.stderr.decode("utf-8", errors="ignore")
+            returncode, stderr = self._stream_archive(cmd, archive_path, progress_cb=progress_cb)
         if returncode != 0:
             stderr = stderr.strip()
             raise RuntimeError(f"SSH fetch failed: {stderr or f'exit code {returncode}'}")
