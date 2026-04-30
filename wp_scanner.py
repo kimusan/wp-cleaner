@@ -944,6 +944,66 @@ def _restore_from_audit(
     return {"restored": restored, "failed": failed, "skipped": skipped}
 
 
+def _list_restorable_quarantine_entries(log_path: Path) -> List[Dict[str, str]]:
+    if not log_path.exists():
+        return []
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return []
+
+    entries: List[Dict[str, str]] = []
+    seen: Set[Tuple[str, str]] = set()
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if str(row.get("action", "")).lower() != "quarantine":
+            continue
+        if str(row.get("result", "")).lower() != "success":
+            continue
+        target = str(row.get("target", "")).strip()
+        quarantine_path = str(row.get("details", {}).get("quarantine_path", "")).strip()
+        timestamp = str(row.get("timestamp", "")).strip()
+        if not target or not quarantine_path:
+            continue
+        token = (target, quarantine_path)
+        if token in seen:
+            continue
+        seen.add(token)
+        qpath = Path(quarantine_path)
+        status = "available" if qpath.exists() else "missing"
+        entries.append(
+            {
+                "target": target,
+                "quarantine_path": quarantine_path,
+                "timestamp": timestamp,
+                "status": status,
+            }
+        )
+    entries.reverse()
+    return entries
+
+
+def _restore_single_entry(target: str, quarantine_path: str) -> Tuple[bool, str]:
+    src = Path(quarantine_path)
+    dst = Path(target)
+    if not src.exists():
+        return False, "quarantine file missing"
+    if dst.exists():
+        return False, "target already exists"
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst))
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
 class WordPressCoreVerifier:
     """Verify local WordPress core files against official release files."""
 
@@ -1111,12 +1171,13 @@ if TEXTUAL_AVAILABLE:
             self.target_path = target_path
 
         def compose(self) -> ComposeResult:
-            with Container(id="detail-container", classes="popup"):
-                yield Label(f"[b]{self.action_label}[/b]")
-                yield Label(f"Target file:\n{self.target_path}", classes="wrap")
-                with Horizontal():
-                    yield Button("Confirm", id="confirm-action", variant="error")
-                    yield Button("Cancel", id="cancel-action")
+            with Container(classes="popup-host"):
+                with Container(id="detail-container", classes="popup"):
+                    yield Label(f"[b]{self.action_label}[/b]")
+                    yield Label(f"Target file:\n{self.target_path}", classes="wrap")
+                    with Horizontal():
+                        yield Button("Confirm", id="confirm-action", variant="error")
+                        yield Button("Cancel", id="cancel-action")
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             if event.button.id == "confirm-action":
@@ -1186,16 +1247,17 @@ if TEXTUAL_AVAILABLE:
             return False
 
         def compose(self) -> ComposeResult:
-            with Container(id="detail-container", classes="popup"):
-                sev_style = SEVERITY_STYLES.get(self.finding.threat_level, "white")
-                yield Label(f"[{sev_style}]● {self.finding.threat_level.upper()}[/]  {self.finding.signature_name}")
-                yield Label(f"[b]File:[/b] {self.finding.file_path}:{self.finding.line_number}")
-                yield Label(f"[b]Signature ID:[/b] {self.finding.signature_id}    [b]Category:[/b] {self.finding.category}")
-                yield Label("[b]Code Context[/b]")
-                with VerticalScroll(classes="code-view"):
-                    yield Static(self._render_code_panel())
-                yield Label(f"[b]What it means:[/b] {self.finding.description}", classes="wrap")
-                yield Label(f"[b]How to remove:[/b] {self.finding.remediation}", classes="wrap")
+            with Container(classes="popup-host"):
+                with Container(id="detail-container", classes="popup"):
+                    sev_style = SEVERITY_STYLES.get(self.finding.threat_level, "white")
+                    yield Label(f"[{sev_style}]● {self.finding.threat_level.upper()}[/]  {self.finding.signature_name}")
+                    yield Label(f"[b]File:[/b] {self.finding.file_path}:{self.finding.line_number}")
+                    yield Label(f"[b]Signature ID:[/b] {self.finding.signature_id}    [b]Category:[/b] {self.finding.category}")
+                    yield Label("[b]Code Context[/b]")
+                    with VerticalScroll(classes="code-view"):
+                        yield Static(self._render_code_panel())
+                    yield Label(f"[b]What it means:[/b] {self.finding.description}", classes="wrap")
+                    yield Label(f"[b]How to remove:[/b] {self.finding.remediation}", classes="wrap")
 
         def _language_for_file(self) -> str:
             ext = Path(self.finding.file_path).suffix.lower()
@@ -1262,6 +1324,65 @@ if TEXTUAL_AVAILABLE:
         def _render_code_panel(self):
             return Panel(self._render_syntax(), title=Path(self.finding.file_path).name)
 
+    class RestoreFromQuarantineScreen(ModalScreen):
+        BINDINGS = [
+            Binding("escape", "cancel", "Close"),
+            Binding("enter", "restore_selected", "Restore"),
+        ]
+
+        def __init__(self, audit_log_path: Path):
+            super().__init__()
+            self.audit_log_path = audit_log_path
+            self.entries: List[Dict[str, str]] = []
+
+        def compose(self) -> ComposeResult:
+            with Container(classes="popup-host"):
+                with Container(id="detail-container", classes="popup"):
+                    yield Label("[b]Restore From Quarantine[/b]")
+                    yield Label("Select a quarantined file and press Restore.", classes="wrap")
+                    yield DataTable(id="restore-table")
+                    with Horizontal():
+                        yield Button("Restore Selected", id="restore-confirm", variant="success")
+                        yield Button("Close", id="restore-cancel")
+
+        def on_mount(self) -> None:
+            table = self.query_one("#restore-table", DataTable)
+            table.add_columns("Status", "Quarantined At", "Original File", "Quarantine Path")
+            table.cursor_type = "row"
+            self.entries = _list_restorable_quarantine_entries(self.audit_log_path)
+            for idx, entry in enumerate(self.entries):
+                status = entry.get("status", "")
+                status_render = f"[green]{status}[/]" if status == "available" else f"[red]{status}[/]"
+                table.add_row(
+                    status_render,
+                    entry.get("timestamp", ""),
+                    entry.get("target", ""),
+                    entry.get("quarantine_path", ""),
+                    key=f"restore_{idx}",
+                )
+            if table.row_count > 0:
+                table.cursor_coordinate = (0, 0)
+
+        def action_cancel(self) -> None:
+            self.dismiss(None)
+
+        def action_restore_selected(self) -> None:
+            table = self.query_one("#restore-table", DataTable)
+            if table.row_count == 0:
+                self.dismiss(None)
+                return
+            row_index = table.cursor_coordinate.row
+            if row_index < 0 or row_index >= len(self.entries):
+                return
+            entry = self.entries[row_index]
+            self.dismiss(entry)
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "restore-confirm":
+                self.action_restore_selected()
+            else:
+                self.dismiss(None)
+
     class ScannerTUI(App):
         LOGO = """██╗    ██╗██████╗       ███████╗ ██████╗ █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗
 ██║    ██║██╔══██╗      ██╔════╝██╔════╝██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗
@@ -1305,12 +1426,21 @@ if TEXTUAL_AVAILABLE:
         #scan-state { color: #7f8c8d; margin: 0; }
         #sort-help { color: #7f8c8d; margin: 0 0 1 0; }
         #findings-table { height: 1fr; min-height: 8; }
+        .popup-host {
+            width: 1fr;
+            height: 1fr;
+            align: center middle;
+        }
         #detail-container {
             width: 90%;
             height: 90%;
             border: heavy #3d4754;
             background: #0f141a;
             padding: 1 2;
+        }
+        #restore-table {
+            height: 1fr;
+            min-height: 8;
         }
         .code-view {
             border: round #334;
@@ -1787,30 +1917,35 @@ if TEXTUAL_AVAILABLE:
             if not self.scan_complete:
                 self.bell()
                 return
-            finding = self._selected_finding()
-            if not finding:
+            entries = _list_restorable_quarantine_entries(self.audit_log_path)
+            if not entries:
+                self.query_one("#sort-help", Static).update("No restorable quarantined files found in audit log")
                 self.bell()
                 return
-            label = "Restore selected file from quarantine?"
 
-            def _after(confirm: bool) -> None:
-                if not confirm:
+            def _after(selection: Optional[Dict[str, str]]) -> None:
+                if not selection:
                     self.query_one("#sort-help", Static).update("Restore cancelled")
                     return
-                outcome = _restore_from_audit(self.audit_log_path, target_filter={finding.file_path})
-                self.query_one("#sort-help", Static).update(
-                    f"Restore complete: restored={outcome['restored']}, failed={outcome['failed']}, skipped={outcome['skipped']}"
-                )
+                target = selection.get("target", "")
+                quarantine_path = selection.get("quarantine_path", "")
+                ok, error = _restore_single_entry(target, quarantine_path)
+                result = "success" if ok else "failed"
+                if ok:
+                    self.query_one("#sort-help", Static).update(f"Restore complete: {target}")
+                else:
+                    self.query_one("#sort-help", Static).update(f"Restore failed: {error}")
+                    self.bell()
                 _append_audit_log(
                     self.audit_log_path,
                     mode="tui",
                     action="restore",
-                    target=finding.file_path,
-                    result="success" if outcome["restored"] > 0 and outcome["failed"] == 0 else "partial" if outcome["restored"] > 0 else "failed",
-                    details=outcome,
+                    target=target or "*",
+                    result=result,
+                    details={"quarantine_path": quarantine_path, "error": error},
                 )
 
-            self.push_screen(ConfirmActionScreen(label, finding.file_path), _after)
+            self.push_screen(RestoreFromQuarantineScreen(self.audit_log_path), _after)
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             button_id = event.button.id or ""
