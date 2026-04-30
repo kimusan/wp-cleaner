@@ -111,6 +111,7 @@ class Signature:
     category: str
     remediation: str
     is_regex: bool = True
+    target_type: str = "all"
 
 @dataclass
 class Finding:
@@ -191,7 +192,7 @@ class ScanStats:
 
 def get_builtin_signatures() -> List[Signature]:
     """Return the full built-in signature database."""
-    return [
+    signatures = [
         Signature("WP001", "FilesMan Backdoor", r"FilesMan", "FilesMan backdoor - common WordPress backdoor", ThreatLevel.CRITICAL, "backdoor", "Remove the infected file or clean the malicious code"),
         Signature("WP002", "Base64 Decode Return", r'"base64_decode"\s*;\s*return', "Obfuscated code using base64_decode with return", ThreatLevel.HIGH, "obfuscation", "Decode and analyze the payload, then remove malicious code"),
         Signature("WP003", "GLOBALS Injection", r';\s*\$GLOBALS', "Suspicious GLOBALS variable access", ThreatLevel.MEDIUM, "injection", "Review code for unauthorized variable injection"),
@@ -320,12 +321,32 @@ def get_builtin_signatures() -> List[Signature]:
         Signature("WP126", "JS Keylogger Exfiltration", r'addEventListener\s*\(\s*[\'"](?:keyup|keydown|input)[\'"]\s*,[\s\S]{0,260}?(fetch|XMLHttpRequest|navigator\.sendBeacon)', "Potential key/input capture with outbound exfiltration", ThreatLevel.HIGH, "skimmer", "Remove key capture logic and validate trusted analytics scripts only"),
         Signature("WP127", "Stealth Location Redirect", r'(setTimeout|setInterval)\s*\([\s\S]{0,160}?(window\.location|document\.location)\s*=', "Delayed client-side redirect often used for stealth traffic hijacking", ThreatLevel.MEDIUM, "redirect", "Review delayed redirect logic and remove unauthorized traffic forwarding"),
     ]
+    php_signature_ids = {
+        "WP004", "WP007", "WP008", "WP009", "WP010", "WP011", "WP014", "WP015",
+        "WP020", "WP021", "WP022", "WP023", "WP024", "WP025", "WP026", "WP027",
+        "WP028", "WP029", "WP043", "WP046", "WP047", "WP050", "WP058", "WP059",
+        "WP060", "WP062", "WP063", "WP075", "WP076", "WP077", "WP078", "WP079",
+        "WP080", "WP083", "WP084", "WP091", "WP095", "WP101", "WP102", "WP103",
+        "WP104", "WP105", "WP106", "WP107", "WP108", "WP111", "WP112", "WP113",
+        "WP114", "WP115", "WP116", "WP117", "WP118", "WP119", "WP120", "WP121",
+        "WP124",
+    }
+    for sig in signatures:
+        if sig.id in php_signature_ids:
+            sig.target_type = "php"
+        elif sig.id in {"WP122", "WP123"}:
+            sig.target_type = "htaccess"
+        elif sig.id in {"WP125", "WP126", "WP127"}:
+            sig.target_type = "js"
+    return signatures
 
 # =============================================================================
 # SIGNATURE MANAGER
 # =============================================================================
 
 class SignatureManager:
+    VALID_TARGET_TYPES = {"all", "php", "js", "htaccess"}
+
     def __init__(self, custom_signature_file: Optional[str] = None):
         self.signatures_by_id: Dict[str, Signature] = {}
         self.custom_file = custom_signature_file
@@ -353,6 +374,13 @@ class SignatureManager:
                 return signatures
         raise ValueError("custom signature file must be a JSON list or {\"signatures\": [...]} object")
 
+    @classmethod
+    def _parse_target_type(cls, value: str) -> str:
+        normalized = (value or "all").strip().lower()
+        if normalized not in cls.VALID_TARGET_TYPES:
+            raise ValueError(f"invalid target_type '{value}'")
+        return normalized
+
     def load_custom(self, signature_file: Optional[str] = None) -> int:
         source = signature_file or self.custom_file
         if not source:
@@ -377,6 +405,7 @@ class SignatureManager:
                 remediation = str(entry.get("remediation", "Review and remediate matched code.")).strip()
                 threat_level = self._parse_threat_level(str(entry.get("threat_level", "medium")))
                 is_regex = bool(entry.get("is_regex", True))
+                target_type = self._parse_target_type(str(entry.get("target_type", "all")))
                 sig = Signature(
                     id=sig_id,
                     name=name,
@@ -386,6 +415,7 @@ class SignatureManager:
                     category=category,
                     remediation=remediation,
                     is_regex=is_regex,
+                    target_type=target_type,
                 )
                 self.signatures_by_id[sig.id] = sig
                 loaded += 1
@@ -408,23 +438,11 @@ class FileScanner:
     SKIP_DIRS = {'.git', '.svn', '.hg', 'node_modules', '__pycache__', '.idea', '.vscode', '.DS_Store'}
     MAX_MATCHES_PER_SIGNATURE_PER_FILE = 25
     HEURISTIC_LONG_TOKEN_RE = re.compile(r"[A-Za-z0-9+/=]{180,}")
-    PHP_FILE_SUFFIXES = {".php", ".phtml", ".php5", ".php7", ".inc"}
-    PHP_SIGNATURE_IDS = {
-        "WP004", "WP007", "WP008", "WP009", "WP010", "WP011", "WP014", "WP015",
-        "WP020", "WP021", "WP022", "WP023", "WP024", "WP025", "WP026", "WP027",
-        "WP028", "WP029", "WP043", "WP046", "WP047", "WP050", "WP058", "WP059",
-        "WP060", "WP062", "WP063", "WP075", "WP076", "WP077", "WP078", "WP079",
-        "WP080", "WP083", "WP084", "WP091", "WP095", "WP101", "WP102", "WP103",
-        "WP104", "WP105", "WP106", "WP107", "WP108", "WP111", "WP112", "WP113",
-        "WP114", "WP115", "WP116", "WP117", "WP118", "WP119", "WP120", "WP121",
-        "WP124",
-    }
-    SIGNATURE_GUARDS: Dict[str, Dict[str, Set[str]]] = {
-        "WP122": {"names": {".htaccess"}},
-        "WP123": {"names": {".htaccess"}},
-        "WP125": {"suffixes": {".js"}},
-        "WP126": {"suffixes": {".js"}},
-        "WP127": {"suffixes": {".js"}},
+    TARGET_TYPE_RULES: Dict[str, Dict[str, Set[str]]] = {
+        "all": {},
+        "php": {"suffixes": {".php", ".phtml", ".php5", ".php7", ".inc"}},
+        "js": {"suffixes": {".js"}},
+        "htaccess": {"names": {".htaccess"}},
     }
 
     def __init__(self, signatures: List[Signature]):
@@ -456,10 +474,9 @@ class FileScanner:
             return False
         return True
 
-    def _signature_allowed_for_file(self, sig_id: str, filepath: Path) -> bool:
-        if sig_id in self.PHP_SIGNATURE_IDS and filepath.suffix.lower() not in self.PHP_FILE_SUFFIXES:
-            return False
-        guard = self.SIGNATURE_GUARDS.get(sig_id)
+    def _signature_allowed_for_file(self, sig: Signature, filepath: Path) -> bool:
+        target_type = (sig.target_type or "all").strip().lower()
+        guard = self.TARGET_TYPE_RULES.get(target_type, self.TARGET_TYPE_RULES["all"])
         if not guard:
             return True
         suffixes = guard.get("suffixes", set())
@@ -607,7 +624,7 @@ class FileScanner:
                     line_starts.append(idx + 1)
             
             for sig, pattern in self.compiled_patterns:
-                if not self._signature_allowed_for_file(sig.id, filepath):
+                if not self._signature_allowed_for_file(sig, filepath):
                     continue
                 signature_match_counts.setdefault(sig.id, 0)
                 for match in pattern.finditer(content):

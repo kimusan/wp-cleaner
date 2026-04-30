@@ -51,6 +51,104 @@ class ScannerTests(unittest.TestCase):
             all_ids = {sig.id for sig in manager.get_all()}
             self.assertIn("CUS001", all_ids)
 
+    def test_signature_manager_loads_custom_signature_target_type(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            custom = root / "custom.json"
+            custom.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "CUS002",
+                            "name": "JS-only marker",
+                            "pattern": "custom_marker_456",
+                            "target_type": "js",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            manager = SignatureManager(str(custom))
+            loaded = manager.load_custom()
+            self.assertEqual(loaded, 1)
+            sig = next(s for s in manager.get_all() if s.id == "CUS002")
+            self.assertEqual(sig.target_type, "js")
+
+    def test_signature_manager_skips_custom_signature_with_invalid_target_type(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            custom = root / "custom.json"
+            custom.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "CUS003",
+                            "name": "Invalid target type",
+                            "pattern": "custom_marker_789",
+                            "target_type": "python",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            manager = SignatureManager(str(custom))
+            loaded = manager.load_custom()
+            self.assertEqual(loaded, 0)
+
+    def test_custom_js_target_type_does_not_match_php(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            custom = root / "custom.json"
+            custom.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "CUS004",
+                            "name": "JS-only custom signature",
+                            "pattern": "custom_marker_999",
+                            "target_type": "js",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            manager = SignatureManager(str(custom))
+            manager.load_custom()
+            scanner = FileScanner(manager.get_all())
+            target = root / "sample.php"
+            target.write_text("<?php echo 'custom_marker_999';", encoding="utf-8")
+
+            result = scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertFalse(any(f.signature_id == "CUS004" for f in result.findings))
+
+    def test_custom_js_target_type_matches_js(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            custom = root / "custom.json"
+            custom.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "CUS005",
+                            "name": "JS-only custom signature",
+                            "pattern": "custom_marker_js",
+                            "target_type": "js",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            manager = SignatureManager(str(custom))
+            manager.load_custom()
+            scanner = FileScanner(manager.get_all())
+            target = root / "sample.js"
+            target.write_text("console.log('custom_marker_js');", encoding="utf-8")
+
+            result = scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "CUS005" for f in result.findings))
+
     def test_should_scan_filters_by_extension_and_minified_name(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
