@@ -53,3 +53,29 @@ Refactor and improve a Python-based WordPress malware scanner, focusing on TUI r
     11. Implement context constraints and weighting (path/extension guards, neighbor-token checks, entropy thresholds) to reduce noise.
     12. Enforce result hygiene: deduplicate findings by `(file, line, signature)` and cap repetitive matches per file/signature.
     13. Add unit/integration tests for each signature family, including false-positive regression fixtures.
+
+### Phase 5: Remote Scan Targets
+
+*   **Objective:** Allow scanning WordPress installations that are not local, using secure remote collection and transport.
+*   **Sub-tasks:**
+    1.  Add SSH/SFTP-based remote scan mode (preferred) for Linux hosts, with key-based authentication support.
+    2.  Add optional FTP/FTPS mode for legacy environments, with explicit warnings about insecure FTP.
+    3.  Implement a remote file inventory + selective fetch strategy (metadata/hash first, content on-demand) to reduce transfer time.
+    4.  Support running baseline verification (core/extensions) against remote files using downloaded metadata/hashes.
+    5.  Add remote profile configuration (host, port, auth method, path presets) and secure secret handling.
+    6.  Add remote scan progress/status messages in TUI and headless mode, including connection and transfer diagnostics.
+    7.  Add integration tests using mock/stub remote targets.
+
+### Phase 6: Database Risk Scanning
+
+*   **Objective:** Detect malicious or risky content in WordPress database tables and present DB findings distinctly from filesystem findings.
+*   **Sub-tasks:**
+    1.  Add database connectors for common WordPress deployments (MySQL/MariaDB over local socket/TCP).
+    2.  Detect DB credentials from `wp-config.php` when possible, with optional explicit CLI override.
+    3.  Implement table scanners for high-risk content (`wp_options`, posts/content tables, users/usermeta, plugin-specific payload tables).
+    4.  Add signature/heuristic checks for spam SEO injections, malicious redirects, hidden admin users/roles, and encoded payloads in DB values.
+    5.  Add safe output limits and sampling for large tables to avoid memory/performance issues.
+    6.  Add separate results surface in TUI: dedicated **Database Findings** tab/screen distinct from file findings.
+    7.  Include DB findings in JSON/HTML reports under a separate section with clear source type labeling.
+    8.  Add optional guided remediation suggestions for DB findings (query preview/export first, no destructive auto-write by default).
+    9.  Add test fixtures and integration tests for clean/infected database scenarios.
