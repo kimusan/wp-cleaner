@@ -2013,6 +2013,8 @@ if TEXTUAL_AVAILABLE:
             try:
                 snapshot_path = await loop.run_in_executor(None, collector.fetch_snapshot, _progress)
             except Exception as exc:
+                collector.cleanup()
+                self.remote_collector = None
                 self.call_from_thread(self._set_status_message, f"Remote fetch failed: {exc}", "red")
                 self.call_from_thread(lambda: self.query_one("#sort-help", Static).update("Remote fetch failed"))
                 self.call_from_thread(self.bell)
@@ -2737,6 +2739,15 @@ class RemoteSSHCollector:
         if returncode != 0:
             stderr = stderr.strip()
             raise RuntimeError(f"SSH fetch failed: {stderr or f'exit code {returncode}'}")
+        try:
+            size = archive_path.stat().st_size
+        except OSError:
+            size = 0
+        if size <= 0:
+            raise RuntimeError(
+                "SSH fetch produced an empty archive. "
+                "Verify remote path exists and that the SSH user can read it."
+            )
         if progress_cb:
             progress_cb("Extracting remote snapshot...")
         self._safe_extract_tar(archive_path, snapshot_dir)
