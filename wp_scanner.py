@@ -22,8 +22,6 @@ import hashlib
 import zipfile
 import tarfile
 import tempfile
-import pty
-import select
 import urllib.request
 import urllib.error
 import asyncio
@@ -2653,7 +2651,16 @@ class RemoteSSHCollector:
     def _build_ssh_base_command(self) -> List[str]:
         cmd = ["ssh", "-p", str(self.config.port)]
         if self.config.password:
-            cmd.append("-tt")
+            cmd.extend(
+                [
+                    "-o",
+                    "NumberOfPasswordPrompts=1",
+                    "-o",
+                    "PreferredAuthentications=password,keyboard-interactive",
+                    "-o",
+                    "PubkeyAuthentication=no",
+                ]
+            )
         if self.config.key_file:
             cmd.extend(["-i", self.config.key_file])
         if self.config.strict_host_key_checking:
@@ -2665,46 +2672,31 @@ class RemoteSSHCollector:
         return cmd
 
     def _run_ssh_with_password(self, cmd: List[str], archive_path: Path) -> Tuple[int, str]:
-        master_fd, slave_fd = pty.openpty()
-        prompt_seen = False
-        stderr_buffer: List[bytes] = []
-        try:
-            with open(archive_path, "wb") as out:
-                proc = subprocess.Popen(
-                    cmd,
-                    stdin=slave_fd,
-                    stdout=out,
-                    stderr=subprocess.PIPE,
-                    close_fds=True,
-                )
-                os.close(slave_fd)
-                while proc.poll() is None:
-                    ready, _, _ = select.select([master_fd], [], [], 0.1)
-                    if ready:
-                        chunk = os.read(master_fd, 4096)
-                        if not chunk:
-                            continue
-                        lower = chunk.decode("utf-8", errors="ignore").lower()
-                        if "password:" in lower and not prompt_seen:
-                            os.write(master_fd, (self.config.password + "\n").encode("utf-8"))
-                            prompt_seen = True
-                    if proc.stderr:
-                        try:
-                            err = proc.stderr.read1(4096)
-                        except Exception:
-                            err = b""
-                        if err:
-                            stderr_buffer.append(err)
-                if proc.stderr:
-                    tail = proc.stderr.read()
-                    if tail:
-                        stderr_buffer.append(tail)
-                return proc.returncode or 0, b"".join(stderr_buffer).decode("utf-8", errors="ignore")
-        finally:
-            try:
-                os.close(master_fd)
-            except OSError:
-                pass
+        if not self.work_dir:
+            raise RuntimeError("internal error: remote work_dir not initialized")
+        askpass_script = self.work_dir / "askpass.sh"
+        askpass_script.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$WP_SCANNER_SSH_PASSWORD\"\n",
+            encoding="utf-8",
+        )
+        askpass_script.chmod(0o700)
+        env = os.environ.copy()
+        env["SSH_ASKPASS"] = str(askpass_script)
+        env["SSH_ASKPASS_REQUIRE"] = "force"
+        env["DISPLAY"] = "wp-scanner:0"
+        env["WP_SCANNER_SSH_PASSWORD"] = self.config.password
+        full_cmd = ["setsid"] + cmd
+        with open(archive_path, "wb") as out:
+            proc = subprocess.run(
+                full_cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=subprocess.PIPE,
+                env=env,
+                check=False,
+            )
+        return proc.returncode, proc.stderr.decode("utf-8", errors="ignore")
 
     @staticmethod
     def _safe_extract_tar(archive: Path, destination: Path) -> None:
