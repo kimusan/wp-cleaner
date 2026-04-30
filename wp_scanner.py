@@ -377,8 +377,6 @@ class FileScanner:
 
     def __init__(self, signatures: List[Signature]):
         self.signatures = signatures
-        self.modified_core_paths: Set[str] = set()
-        self.modified_core_details: Dict[str, Dict[str, str | int]] = {}
         self.compiled_patterns: List[Tuple[Signature, re.Pattern]] = []
         for sig in signatures:
             try:
@@ -431,39 +429,6 @@ class FileScanner:
         location = classify_path_location(filepath)
         lower_path = str(filepath).replace("\\", "/").lower()
         filename = filepath.name.lower()
-        normalized_path = str(filepath.resolve()) if filepath.exists() else str(filepath)
-
-        # H005: File is part of core tree but differs from official baseline.
-        if normalized_path in self.modified_core_paths:
-            line_num = 1
-            local_line = lines[0] if lines else ""
-            ref_line = ""
-            details = self.modified_core_details.get(normalized_path)
-            if details:
-                line_num = int(details.get("line_number", 1))
-                local_line = str(details.get("local_line", local_line))
-                ref_line = str(details.get("reference_line", ""))
-            context_before, context_after = self._context_for_line(lines, line_num)
-            findings.append(
-                Finding(
-                    file_path=str(filepath),
-                    line_number=line_num,
-                    signature_id="H005",
-                    signature_name="Heuristic: Modified WordPress Core File",
-                    threat_level=ThreatLevel.MEDIUM.value,
-                    category="heuristic_core_modified",
-                    matched_content=(local_line[:200] if local_line else str(filepath)),
-                    context_before=context_before,
-                    context_after=context_after,
-                    description=(
-                        "Core file differs from matching official WordPress release baseline."
-                        + (f" Reference line: {ref_line[:120]}" if ref_line else "")
-                    ),
-                    remediation="Review diff against official core and restore trusted file if change is unauthorized.",
-                    location=location,
-                )
-            )
-
         # H001: Unexpected PHP in web-accessible uploads/cache paths.
         if filepath.suffix.lower() == ".php" and (
             "/wp-content/uploads/" in lower_path or "/wp-content/cache/" in lower_path
@@ -1778,8 +1743,6 @@ if TEXTUAL_AVAILABLE:
                         files,
                         _progress,
                     )
-                    self.scanner.modified_core_paths = {str(path.resolve()) for path in modified}
-                    self.scanner.modified_core_details = dict(self.core_verifier.modified_core_details)
                     self.sub_title = f"Core baseline active ({self.core_verifier.version}), skipped {skipped} unchanged core files"
                     self._set_status_message("RUNNING", "green")
                 else:
@@ -2265,8 +2228,6 @@ def main():
             ok, msg = verifier.prepare(scan_root, progress_cb=print)
             if ok:
                 files, skipped, modified = verifier.filter_identical_core_files(scan_root, files, progress_cb=print)
-                scanner.modified_core_paths = {str(path.resolve()) for path in modified}
-                scanner.modified_core_details = dict(verifier.modified_core_details)
                 print(f"Core baseline active (version {verifier.version}); skipped {skipped} unchanged core files.")
             else:
                 print(f"Core baseline skipped: {msg}")
