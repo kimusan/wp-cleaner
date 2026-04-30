@@ -332,6 +332,48 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(result.status, ScanStatus.COMPLETED.value)
             self.assertFalse(any(f.signature_id in {'WP119', 'WP120', 'WP121'} for f in result.findings))
 
+    def test_scan_file_detects_htaccess_remote_redirect_rule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / ".htaccess"
+            target.write_text(
+                "RewriteEngine On\n"
+                "RewriteRule ^(.*)$ https://evil.example/$1 [R=302,L]\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP123" for f in result.findings))
+
+    def test_scan_file_detects_conditional_referrer_redirect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "redir.php"
+            target.write_text(
+                "<?php\n"
+                "if (strpos($_SERVER['HTTP_REFERER'], 'google') === false) { header('Location: https://evil.example'); }\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP124" for f in result.findings))
+
+    def test_scan_file_does_not_flag_local_htaccess_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / ".htaccess"
+            target.write_text(
+                "RewriteEngine On\n"
+                "RewriteRule ^index\\.php$ - [L]\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertFalse(any(f.signature_id in {'WP122', 'WP123', 'WP124'} for f in result.findings))
+
     def test_scan_file_deduplicates_and_caps_noisy_matches(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

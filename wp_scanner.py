@@ -313,6 +313,9 @@ def get_builtin_signatures() -> List[Signature]:
         Signature("WP119", "Dropper Write Uploads PHP", r'file_put_contents\s*\(\s*[^\n]{0,220}?wp-content/(?:uploads|cache|upgrade|tmp)/[^\n]{0,180}?\.php', "Direct write of PHP payload into writable WordPress content paths", ThreatLevel.CRITICAL, "dropper", "Remove dropped payload and block PHP execution in writable content directories"),
         Signature("WP120", "Suspicious Upload Move PHP", r'move_uploaded_file\s*\([\s\S]{0,220}?wp-content/(?:uploads|cache|upgrade|tmp)/[^\n]{0,180}?\.php', "Uploaded file moved as PHP into writable content paths", ThreatLevel.CRITICAL, "dropper", "Remove uploaded PHP payload and enforce extension/MIME validation"),
         Signature("WP121", "Runtime Tmp PHP Writer", r'(tempnam|tmpfile)\s*\([\s\S]{0,180}?file_put_contents\s*\([\s\S]{0,180}?\.php', "Temporary-file workflow writing executable PHP content", ThreatLevel.HIGH, "dropper", "Inspect temp-file write flow and remove unauthorized runtime payload generation"),
+        Signature("WP122", "Htaccess Cloaked Redirect", r'RewriteCond\s+%\{HTTP_USER_AGENT\}\s+!?\^?\(\?i:\.\*googlebot\.\*|\.\*bingbot\.\*|\.\*yandex\.\*\)', "User-agent based cloaking in rewrite rules", ThreatLevel.HIGH, "redirect_cloaking", "Remove cloaking rewrite conditions and restore legitimate routing rules"),
+        Signature("WP123", "Htaccess Remote Redirect Rule", r'RewriteRule\s+\^.*\$\s+https?://[^\s]+', "RewriteRule issuing full remote redirect", ThreatLevel.HIGH, "redirect", "Review rewrite destination and remove unauthorized external redirects"),
+        Signature("WP124", "Conditional Referrer Redirect", r"(HTTP_REFERER|REMOTE_ADDR)[\s\S]{0,200}?(header\s*\(\s*['\"]Location:|window\.location\s*=)", "Referrer/IP-gated redirect logic", ThreatLevel.MEDIUM, "redirect_cloaking", "Review conditional redirect logic and remove traffic-cloaking behavior"),
     ]
 
 # =============================================================================
@@ -417,7 +420,8 @@ class FileScanner:
 
     def should_scan(self, filepath: Path) -> bool:
         """Check if file should be scanned."""
-        if filepath.suffix.lower() not in self.SCAN_EXTENSIONS:
+        suffix = filepath.suffix.lower()
+        if suffix not in self.SCAN_EXTENSIONS and filepath.name.lower() not in self.SCAN_EXTENSIONS:
             return False
         if '.min.' in filepath.name:
             return False
