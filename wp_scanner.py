@@ -976,7 +976,9 @@ def _list_restorable_quarantine_entries(log_path: Path) -> List[Dict[str, str]]:
             continue
         seen.add(token)
         qpath = Path(quarantine_path)
-        status = "available" if qpath.exists() else "missing"
+        if not qpath.exists():
+            continue
+        status = "available"
         entries.append(
             {
                 "target": target,
@@ -1172,7 +1174,7 @@ if TEXTUAL_AVAILABLE:
 
         def compose(self) -> ComposeResult:
             with Container(classes="popup-host"):
-                with Container(id="detail-container", classes="popup"):
+                with Container(id="confirm-container", classes="popup"):
                     yield Label(f"[b]{self.action_label}[/b]")
                     yield Label(f"Target file:\n{self.target_path}", classes="wrap")
                     with Horizontal():
@@ -1328,12 +1330,15 @@ if TEXTUAL_AVAILABLE:
         BINDINGS = [
             Binding("escape", "cancel", "Close"),
             Binding("enter", "restore_selected", "Restore"),
+            Binding("space", "toggle_selected", "Select"),
+            Binding("a", "toggle_select_all", "Select All"),
         ]
 
         def __init__(self, audit_log_path: Path):
             super().__init__()
             self.audit_log_path = audit_log_path
             self.entries: List[Dict[str, str]] = []
+            self.selected_restore_keys: Set[str] = set()
 
         def compose(self) -> ComposeResult:
             with Container(classes="popup-host"):
@@ -1347,21 +1352,31 @@ if TEXTUAL_AVAILABLE:
 
         def on_mount(self) -> None:
             table = self.query_one("#restore-table", DataTable)
-            table.add_columns("Status", "Quarantined At", "Original File", "Quarantine Path")
+            table.add_columns("Sel", "Status", "Quarantined At", "Original File", "Quarantine Path")
             table.cursor_type = "row"
+            self._refresh_restore_table(0)
+
+        def _refresh_restore_table(self, keep_row: int) -> None:
+            table = self.query_one("#restore-table", DataTable)
             self.entries = _list_restorable_quarantine_entries(self.audit_log_path)
+            valid_keys = {f"restore_{idx}" for idx in range(len(self.entries))}
+            self.selected_restore_keys &= valid_keys
+            table.clear()
             for idx, entry in enumerate(self.entries):
                 status = entry.get("status", "")
                 status_render = f"[green]{status}[/]" if status == "available" else f"[red]{status}[/]"
+                key = f"restore_{idx}"
+                mark = "[green]☑[/]" if key in self.selected_restore_keys else "☐"
                 table.add_row(
+                    mark,
                     status_render,
                     entry.get("timestamp", ""),
                     entry.get("target", ""),
                     entry.get("quarantine_path", ""),
-                    key=f"restore_{idx}",
+                    key=key,
                 )
             if table.row_count > 0:
-                table.cursor_coordinate = (0, 0)
+                table.cursor_coordinate = (min(keep_row, table.row_count - 1), 0)
 
         def action_cancel(self) -> None:
             self.dismiss(None)
@@ -1371,11 +1386,47 @@ if TEXTUAL_AVAILABLE:
             if table.row_count == 0:
                 self.dismiss(None)
                 return
+            if self.selected_restore_keys:
+                selected_entries: List[Dict[str, str]] = []
+                for key in sorted(self.selected_restore_keys):
+                    try:
+                        idx = int(key.split("_", 1)[1])
+                    except (ValueError, IndexError):
+                        continue
+                    if 0 <= idx < len(self.entries):
+                        selected_entries.append(self.entries[idx])
+                self.dismiss(selected_entries if selected_entries else None)
+                return
             row_index = table.cursor_coordinate.row
             if row_index < 0 or row_index >= len(self.entries):
                 return
-            entry = self.entries[row_index]
-            self.dismiss(entry)
+            self.dismiss([self.entries[row_index]])
+
+        def action_toggle_selected(self) -> None:
+            table = self.query_one("#restore-table", DataTable)
+            if table.row_count == 0:
+                return
+            row_index = table.cursor_coordinate.row
+            if row_index < 0 or row_index >= len(self.entries):
+                return
+            key = f"restore_{row_index}"
+            if key in self.selected_restore_keys:
+                self.selected_restore_keys.remove(key)
+            else:
+                self.selected_restore_keys.add(key)
+            self._refresh_restore_table(row_index)
+
+        def action_toggle_select_all(self) -> None:
+            table = self.query_one("#restore-table", DataTable)
+            if table.row_count == 0:
+                return
+            all_keys = {f"restore_{idx}" for idx in range(len(self.entries))}
+            if all_keys.issubset(self.selected_restore_keys):
+                self.selected_restore_keys.clear()
+            else:
+                self.selected_restore_keys = set(all_keys)
+            current_row = table.cursor_coordinate.row
+            self._refresh_restore_table(current_row)
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             if event.button.id == "restore-confirm":
@@ -1424,7 +1475,7 @@ if TEXTUAL_AVAILABLE:
         #filter-row { height: 3; margin: 0; }
         #filter-row Button { min-width: 10; margin-right: 1; }
         #action-row { height: 3; margin: 0; }
-        #action-row Button { min-width: 12; margin-right: 1; }
+        #action-row Button { min-width: 0; width: auto; margin-right: 1; padding: 0 1; }
         #scan-state { color: #7f8c8d; margin: 0; }
         #sort-help { color: #7f8c8d; margin: 0 0 1 0; }
         #findings-table { height: 1fr; min-height: 8; }
@@ -1436,6 +1487,14 @@ if TEXTUAL_AVAILABLE:
         #detail-container {
             width: 90%;
             height: 90%;
+            border: heavy #3d4754;
+            background: #0f141a;
+            padding: 1 2;
+        }
+        #confirm-container {
+            width: 70;
+            height: auto;
+            max-height: 70%;
             border: heavy #3d4754;
             background: #0f141a;
             padding: 1 2;
@@ -1588,6 +1647,10 @@ if TEXTUAL_AVAILABLE:
 
         def _refresh_table(self) -> None:
             table = self.query_one(DataTable)
+            keep_row = table.cursor_coordinate.row if table.row_count > 0 else 0
+            keep_key: Optional[str] = None
+            if 0 <= keep_row < len(self.visible_rows):
+                keep_key = self.visible_rows[keep_row][0]
             table.clear()
             rows = list(self.finding_rows)
             if self._sorting_active:
@@ -1607,7 +1670,14 @@ if TEXTUAL_AVAILABLE:
                     key=key,
                 )
             if table.row_count > 0:
-                table.cursor_coordinate = (0, 0)
+                if keep_key is not None:
+                    new_index = next((idx for idx, (row_key, _f) in enumerate(self.visible_rows) if row_key == keep_key), None)
+                    if new_index is not None:
+                        table.cursor_coordinate = (new_index, 0)
+                    else:
+                        table.cursor_coordinate = (min(keep_row, table.row_count - 1), 0)
+                else:
+                    table.cursor_coordinate = (min(keep_row, table.row_count - 1), 0)
 
         def _set_filter(self, filter_name: str) -> None:
             if filter_name not in self._severity_filters:
@@ -1981,27 +2051,31 @@ if TEXTUAL_AVAILABLE:
                 self.bell()
                 return
 
-            def _after(selection: Optional[Dict[str, str]]) -> None:
+            def _after(selection: Optional[List[Dict[str, str]]]) -> None:
                 if not selection:
                     self.query_one("#sort-help", Static).update("Restore cancelled")
                     return
-                target = selection.get("target", "")
-                quarantine_path = selection.get("quarantine_path", "")
-                ok, error = _restore_single_entry(target, quarantine_path)
-                result = "success" if ok else "failed"
-                if ok:
-                    self.query_one("#sort-help", Static).update(f"Restore complete: {target}")
-                else:
-                    self.query_one("#sort-help", Static).update(f"Restore failed: {error}")
+                restored = 0
+                failed = 0
+                for row in selection:
+                    target = row.get("target", "")
+                    quarantine_path = row.get("quarantine_path", "")
+                    ok, error = _restore_single_entry(target, quarantine_path)
+                    if ok:
+                        restored += 1
+                    else:
+                        failed += 1
+                    _append_audit_log(
+                        self.audit_log_path,
+                        mode="tui",
+                        action="restore",
+                        target=target or "*",
+                        result="success" if ok else "failed",
+                        details={"quarantine_path": quarantine_path, "error": error},
+                    )
+                self.query_one("#sort-help", Static).update(f"Restore complete: restored={restored}, failed={failed}")
+                if failed:
                     self.bell()
-                _append_audit_log(
-                    self.audit_log_path,
-                    mode="tui",
-                    action="restore",
-                    target=target or "*",
-                    result=result,
-                    details={"quarantine_path": quarantine_path, "error": error},
-                )
 
             self.push_screen(RestoreFromQuarantineScreen(self.audit_log_path), _after)
 
