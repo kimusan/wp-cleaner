@@ -123,6 +123,19 @@ class ScannerTests(unittest.TestCase):
                 self.scanner.MAX_MATCHES_PER_SIGNATURE_PER_FILE,
             )
 
+    def test_scan_file_does_not_flag_fontawesome_bitcoin_as_miner_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "icons.css"
+            target.write_text(
+                ".fa-bitcoin:before { content: '\\\\f15a'; }\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertFalse(any(f.signature_id == "WP036" for f in result.findings))
+
     def test_collect_files_skips_git_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

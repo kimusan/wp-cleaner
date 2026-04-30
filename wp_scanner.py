@@ -192,7 +192,7 @@ def get_builtin_signatures() -> List[Signature]:
         Signature("WP033", "Wp Config Get", r'get_currentuserinfo|wp_get_current_user', "WordPress user info access", ThreatLevel.LOW, "suspicious", "Verify in context - could be credential harvester"),
         Signature("WP034", "Admin Email Grabber", r'get_option\s*\(\s*[\'"]admin_email', "Admin email retrieval", ThreatLevel.MEDIUM, "data_theft", "Verify if used for spam or legitimate purpose"),
         Signature("WP035", "Wp Users Query", r'WP_User_Query|get_users', "User query - potential data harvesting", ThreatLevel.MEDIUM, "data_theft", "Verify the purpose of user enumeration"),
-        Signature("WP036", "Crypto Miner Pool", r'(stratum+tcp|cryptonight|monero|bitcoin)', "Cryptocurrency mining pool connection", ThreatLevel.CRITICAL, "crypto_miner", "Remove the miner and check for persistence"),
+        Signature("WP036", "Crypto Miner Pool", r'(stratum\+tcp|cryptonight|randomx|ethash|\bmonero(?:-miner)?\b)', "Cryptocurrency mining pool connection", ThreatLevel.CRITICAL, "crypto_miner", "Remove the miner and check for persistence"),
         Signature("WP037", "Coinhive", r'coinhive|cnv1\.js', "Coinhive crypto miner", ThreatLevel.CRITICAL, "crypto_miner", "Remove Coinhive integration"),
         Signature("WP038", "Jquery Load Suspicious", r'\$\.getScript\s*\([^)]*\.js', "Dynamic script loading", ThreatLevel.MEDIUM, "suspicious", "Verify the script source is legitimate"),
         Signature("WP039", "Document Write", r'document\.write\s*\(', "Document write - potential XSS", ThreatLevel.MEDIUM, "injection", "Review for malicious content injection"),
