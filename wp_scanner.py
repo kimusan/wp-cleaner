@@ -257,6 +257,12 @@ def get_builtin_signatures() -> List[Signature]:
         Signature("WP098", "Mining Script", r'(cryptonight|randomx|monero-miner)', "Cryptocurrency mining script", ThreatLevel.CRITICAL, "crypto_miner", "Remove the miner immediately"),
         Signature("WP099", "Suspicious Domain", r'(pastebin\.com|raw.githubusercontent.com|bit.ly|tinyurl)', "Reference to suspicious domain", ThreatLevel.MEDIUM, "suspicious", "Verify external resource is safe"),
         Signature("WP100", "Data URI", r'data:text/html|data:application/javascript', "Data URI - potential XSS vector", ThreatLevel.MEDIUM, "injection", "Review data URI content"),
+        Signature("WP101", "Assert Function Generic", r'(?<!@)\bassert\s*\(', "Assert function invocation - potential dynamic code execution", ThreatLevel.HIGH, "backdoor", "Remove or harden assert usage and review caller-controlled input paths"),
+        Signature("WP102", "Include From Superglobal", r'(include|require)(?:_once)?\s*\(\s*\$_(GET|POST|REQUEST|COOKIE)\s*\[', "Dynamic include/require from request data", ThreatLevel.CRITICAL, "backdoor", "Remove dynamic include from user input and restore trusted code"),
+        Signature("WP103", "Eval Superglobal Input", r'(eval|assert)\s*\(\s*\$_(GET|POST|REQUEST|COOKIE)\s*\[', "Direct execution of user-controlled input", ThreatLevel.CRITICAL, "injection", "Remove runtime execution of request data and patch entry point"),
+        Signature("WP104", "Php Input Execution Chain", r'php://input.*\b(eval|assert|create_function)\s*\(', "Raw request body tied to runtime code execution", ThreatLevel.CRITICAL, "backdoor", "Remove request-body execution logic and inspect for follow-on payloads"),
+        Signature("WP105", "Decoded Include Require", r'(include|require)(?:_once)?\s*\(\s*(?:base64_decode|gzinflate|str_rot13)\s*\(', "Include/require on decoded or inflated payload", ThreatLevel.HIGH, "obfuscation", "Decode payload, verify intent, and remove malicious loader logic"),
+        Signature("WP106", "Preg Replace Eval Modifier", r'preg_replace\s*\(\s*[\'"][^\'"]*\/e[^\'"]*[\'"]', "Legacy preg_replace /e modifier - execution primitive", ThreatLevel.HIGH, "injection", "Replace with safe callback and remove executable regex modifiers"),
     ]
 
 # =============================================================================

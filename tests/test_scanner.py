@@ -79,6 +79,34 @@ class ScannerTests(unittest.TestCase):
             self.assertGreaterEqual(len(result.findings), 1)
             self.assertTrue(any(f.signature_id == "WP021" for f in result.findings))
 
+    def test_scan_file_detects_include_from_superglobal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "loader.php"
+            target.write_text(
+                "<?php\n"
+                "include($_POST['payload']);\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP102" for f in result.findings))
+
+    def test_scan_file_detects_assert_superglobal_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "exec.php"
+            target.write_text(
+                "<?php\n"
+                "assert($_REQUEST['cmd']);\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP103" for f in result.findings))
+
     def test_scan_file_deduplicates_and_caps_noisy_matches(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

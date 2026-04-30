@@ -35,3 +35,21 @@ Refactor and improve a Python-based WordPress malware scanner, focusing on TUI r
     4.  Improve TUI user experience (e.g., live logging of scanned files, better filtering and sorting options for findings, interactive remediation suggestions).
     5.  Add options for automatic quarantine or deletion of detected malicious files (with user confirmation).
     6.  Add packaging and distribution support so the scanner can be installed via `pip` and `pipx` (including `pyproject.toml`, console entry point, dependency metadata, and publish workflow).
+
+### Phase 4: Signature Expansion & Detection Quality
+
+*   **Objective:** Expand malware signature coverage while keeping false positives manageable through context-aware matching and validation.
+*   **Sub-tasks:**
+    1.  Add high-value webshell and dynamic execution signatures (`assert`, legacy `preg_replace /e`, `create_function`, variable-variable superglobal execution chains).
+    2.  Add include/require and `php://input`-driven execution signatures for request-controlled code loading.
+    3.  Add obfuscation-chain signatures (multi-stage decode patterns, `chr()` builders, packed payload patterns).
+    4.  Add command execution and persistence signatures (`system/exec/shell_exec/passthru/proc_open`, suspicious cron callback patterns).
+    5.  Add WordPress privilege-abuse signatures (suspicious admin user creation, direct capability escalation patterns).
+    6.  Add remote C2/exfil signatures (`curl_exec`, `wp_remote_*`, suspicious hardcoded endpoints/IP patterns).
+    7.  Add filesystem dropper signatures (writing executable PHP payloads into uploads/cache/tmp paths).
+    8.  Add `.htaccess` abuse signatures (redirect cloaking, conditional payload delivery rules).
+    9.  Add JavaScript skimmer/redirect signatures (form-hook exfiltration and silent redirect chains).
+    10. Add crypto-miner signatures (CoinHive/WebMiner-style indicators, suspicious `stratum+tcp` and miner bootstrap patterns).
+    11. Implement context constraints and weighting (path/extension guards, neighbor-token checks, entropy thresholds) to reduce noise.
+    12. Enforce result hygiene: deduplicate findings by `(file, line, signature)` and cap repetitive matches per file/signature.
+    13. Add unit/integration tests for each signature family, including false-positive regression fixtures.
