@@ -429,6 +429,27 @@ class SignatureManager:
     def get_all(self) -> List[Signature]:
         return list(self.signatures_by_id.values())
 
+    def export_to_file(self, output_file: str) -> int:
+        path = Path(output_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rows = []
+        for sig in sorted(self.get_all(), key=lambda s: s.id):
+            rows.append(
+                {
+                    "id": sig.id,
+                    "name": sig.name,
+                    "pattern": sig.pattern,
+                    "description": sig.description,
+                    "threat_level": sig.threat_level.value,
+                    "category": sig.category,
+                    "remediation": sig.remediation,
+                    "is_regex": sig.is_regex,
+                    "target_type": (sig.target_type or "all"),
+                }
+            )
+        path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        return len(rows)
+
 # =============================================================================
 # FILE SCANNER
 # =============================================================================
@@ -2496,6 +2517,7 @@ def main():
     general = parser.add_argument_group("General Options")
     general.add_argument('--threads', type=int, default=os.cpu_count(), help='Number of threads')
     general.add_argument('--signatures', default='', help='Path to custom JSON signatures file')
+    general.add_argument('--export-signatures', default='', help='Write active signatures to JSON file and exit')
     general.add_argument('--verify-core', action='store_true', help='Pre-verify against official WordPress core and skip unchanged core files')
     general.add_argument('--verify-core-offline', action='store_true', help='Use only cached core baseline data (no network download)')
     general.add_argument('--verify-core-cache', default='.wp-scanner-cache', help='Cache directory for official WordPress core files')
@@ -2526,6 +2548,10 @@ def main():
     if args.signatures:
         loaded_custom = sig_manager.load_custom()
         print(f"Loaded {loaded_custom} custom signatures from {args.signatures}")
+    if args.export_signatures:
+        exported = sig_manager.export_to_file(args.export_signatures)
+        print(f"Exported {exported} signatures to {args.export_signatures}")
+        return
     scanner = FileScanner(sig_manager.get_all())
     verifier = None
     extension_verifier = None

@@ -95,6 +95,24 @@ class ScannerTests(unittest.TestCase):
             loaded = manager.load_custom()
             self.assertEqual(loaded, 0)
 
+    def test_signature_manager_exports_and_reloads_signatures_with_target_type(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            export_file = root / "signatures.json"
+
+            manager = SignatureManager()
+            manager.load_builtin()
+            exported = manager.export_to_file(str(export_file))
+            self.assertGreater(exported, 100)
+
+            reloaded = SignatureManager(str(export_file))
+            loaded = reloaded.load_custom()
+            self.assertEqual(loaded, exported)
+            sig_ids = {sig.id for sig in reloaded.get_all()}
+            self.assertIn("WP021", sig_ids)
+            wp021 = next(sig for sig in reloaded.get_all() if sig.id == "WP021")
+            self.assertEqual(wp021.target_type, "php")
+
     def test_custom_js_target_type_does_not_match_php(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
