@@ -148,6 +148,34 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(result.status, ScanStatus.COMPLETED.value)
             self.assertTrue(any(f.signature_id == "WP103" for f in result.findings))
 
+    def test_scan_file_detects_multi_decode_chain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "obf-chain.php"
+            target.write_text(
+                "<?php\n"
+                "$x = base64_decode(gzinflate($payload));\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP107" for f in result.findings))
+
+    def test_scan_file_detects_chr_array_builder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "obf-chr.php"
+            target.write_text(
+                "<?php\n"
+                "$x = implode('', array_map('chr', array(101,118,97,108)));\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP108" for f in result.findings))
+
     def test_scan_file_deduplicates_and_caps_noisy_matches(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

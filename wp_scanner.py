@@ -298,6 +298,10 @@ def get_builtin_signatures() -> List[Signature]:
         Signature("WP104", "Php Input Execution Chain", r'php://input.*\b(eval|assert|create_function)\s*\(', "Raw request body tied to runtime code execution", ThreatLevel.CRITICAL, "backdoor", "Remove request-body execution logic and inspect for follow-on payloads"),
         Signature("WP105", "Decoded Include Require", r'(include|require)(?:_once)?\s*\(\s*(?:base64_decode|gzinflate|str_rot13)\s*\(', "Include/require on decoded or inflated payload", ThreatLevel.HIGH, "obfuscation", "Decode payload, verify intent, and remove malicious loader logic"),
         Signature("WP106", "Preg Replace Eval Modifier", r'preg_replace\s*\(\s*[\'"][^\'"]*\/e[^\'"]*[\'"]', "Legacy preg_replace /e modifier - execution primitive", ThreatLevel.HIGH, "injection", "Replace with safe callback and remove executable regex modifiers"),
+        Signature("WP107", "Multi Decode Chain", r'(?:base64_decode|gzinflate|gzuncompress|str_rot13)\s*\(\s*(?:base64_decode|gzinflate|gzuncompress|str_rot13)\s*\(', "Layered decode/decompress chain often used for payload obfuscation", ThreatLevel.HIGH, "obfuscation", "Unpack decode chain and review plaintext before execution paths"),
+        Signature("WP108", "Chr Array Builder", r'array_map\s*\(\s*[\'"]chr[\'"]\s*,\s*array\s*\(', "Character array builder used to reconstruct hidden payload strings", ThreatLevel.HIGH, "obfuscation", "Reconstruct output string and inspect downstream execution usage"),
+        Signature("WP109", "Eval Unescape", r'eval\s*\(\s*unescape\s*\(', "Eval + unescape chain in script content", ThreatLevel.HIGH, "obfuscation", "Decode escaped payload and remove unsafe runtime evaluation"),
+        Signature("WP110", "Function Atob Constructor", r'new\s+Function\s*\(\s*atob\s*\(', "Dynamic Function constructor with base64 decoding", ThreatLevel.HIGH, "obfuscation", "Decode function body and remove dynamic code construction"),
     ]
 
 # =============================================================================
