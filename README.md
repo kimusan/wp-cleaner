@@ -1,3 +1,5 @@
+![wp-scanner screenshot](https://raw.githubusercontent.com/kimusan/wp-cleaner/master/assets/screenshot.png)
+
 # wp-scanner
 _By Kim Schulz <kim@schulz.dk>_
 
