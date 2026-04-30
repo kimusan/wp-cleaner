@@ -102,6 +102,24 @@ class ScannerTests(unittest.TestCase):
             self.assertTrue(any(f.signature_id == "WP021" for f in result.findings))
             self.assertTrue(all(f.location == "plugin" for f in result.findings))
 
+    def test_scan_file_sets_unverified_theme_location(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            theme_dir = root / "wp-content" / "themes" / "demo-theme"
+            theme_dir.mkdir(parents=True, exist_ok=True)
+            target = theme_dir / "functions.php"
+            target.write_text(
+                "<?php\n"
+                "eval(base64_decode('ZWNobyAnaGVsbG8nOw=='));\n",
+                encoding="utf-8",
+            )
+            self.scanner.unverified_extension_prefixes = {"wp-content/themes/demo-theme"}
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP021" for f in result.findings))
+            self.assertTrue(all(f.location == "unverified theme" for f in result.findings))
+
     def test_scan_file_detects_include_from_superglobal(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

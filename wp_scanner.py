@@ -129,8 +129,21 @@ class Finding:
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
-def classify_path_location(path: Path) -> str:
+def classify_path_location(path: Path, unverified_prefixes: Optional[Set[str]] = None) -> str:
     p = str(path).replace("\\", "/").lower()
+    if unverified_prefixes:
+        for prefix in unverified_prefixes:
+            prefix = prefix.strip("/").lower()
+            if not prefix:
+                continue
+            if f"/{prefix}/" in p or p.endswith(f"/{prefix}"):
+                if prefix.startswith("wp-content/themes/"):
+                    return "unverified theme"
+                if prefix.startswith("wp-content/plugins/"):
+                    return "unverified plugin"
+                if prefix.startswith("wp-content/mu-plugins/"):
+                    return "unverified mu-plugin"
+                return "unverified extension"
     if "/wp-content/plugins/" in p:
         return "plugin"
     if "/wp-content/mu-plugins/" in p:
@@ -377,6 +390,7 @@ class FileScanner:
 
     def __init__(self, signatures: List[Signature]):
         self.signatures = signatures
+        self.unverified_extension_prefixes: Set[str] = set()
         self.compiled_patterns: List[Tuple[Signature, re.Pattern]] = []
         for sig in signatures:
             try:
@@ -426,7 +440,7 @@ class FileScanner:
 
     def _heuristic_findings(self, filepath: Path, content: str, lines: List[str]) -> List[Finding]:
         findings: List[Finding] = []
-        location = classify_path_location(filepath)
+        location = classify_path_location(filepath, self.unverified_extension_prefixes)
         lower_path = str(filepath).replace("\\", "/").lower()
         filename = filepath.name.lower()
         # H001: Unexpected PHP in web-accessible uploads/cache paths.
@@ -523,7 +537,7 @@ class FileScanner:
     def scan_file(self, filepath: Path) -> ScanResult:
         start_time = time.monotonic()
         findings: List[Finding] = []
-        location = classify_path_location(filepath)
+        location = classify_path_location(filepath, self.unverified_extension_prefixes)
         seen_finding_keys: set[tuple[str, int, str]] = set()
         signature_match_counts: Dict[str, int] = {}
         try:
@@ -1162,6 +1176,7 @@ class WordPressExtensionVerifier:
         self.offline = offline
         self.reference_hashes: Dict[str, str] = {}
         self.unverifiable_extensions: List[str] = []
+        self.unverifiable_prefixes: Set[str] = set()
 
     @staticmethod
     def _sha256_file(path: Path) -> str:
@@ -1237,14 +1252,17 @@ class WordPressExtensionVerifier:
         rel_base = f"wp-content/plugins/{slug}"
         if not version:
             self.unverifiable_extensions.append(f"plugin:{slug}")
+            self.unverifiable_prefixes.add(rel_base)
             return
         extracted = self._download_and_extract("plugin", slug, version)
         if not extracted:
             self.unverifiable_extensions.append(f"plugin:{slug}@{version}")
+            self.unverifiable_prefixes.add(rel_base)
             return
         root = self._first_real_subdir(extracted)
         if root is None:
             self.unverifiable_extensions.append(f"plugin:{slug}@{version}")
+            self.unverifiable_prefixes.add(rel_base)
             return
         for walk_root, _dirs, files in os.walk(root):
             for name in files:
@@ -1261,14 +1279,17 @@ class WordPressExtensionVerifier:
         rel_base = f"wp-content/themes/{slug}"
         if not version:
             self.unverifiable_extensions.append(f"theme:{slug}")
+            self.unverifiable_prefixes.add(rel_base)
             return
         extracted = self._download_and_extract("theme", slug, version)
         if not extracted:
             self.unverifiable_extensions.append(f"theme:{slug}@{version}")
+            self.unverifiable_prefixes.add(rel_base)
             return
         root = self._first_real_subdir(extracted)
         if root is None:
             self.unverifiable_extensions.append(f"theme:{slug}@{version}")
+            self.unverifiable_prefixes.add(rel_base)
             return
         for walk_root, _dirs, files in os.walk(root):
             for name in files:
@@ -1287,6 +1308,7 @@ class WordPressExtensionVerifier:
     ) -> Tuple[bool, str]:
         self.reference_hashes.clear()
         self.unverifiable_extensions.clear()
+        self.unverifiable_prefixes.clear()
         core_hashes = core_hashes or {}
         plugins_dir = scan_root / "wp-content" / "plugins"
         themes_dir = scan_root / "wp-content" / "themes"
@@ -1988,9 +2010,11 @@ if TEXTUAL_AVAILABLE:
                         _ext_progress,
                     )
                     self.ignored_files += skipped_ext
+                    self.scanner.unverified_extension_prefixes = set(self.extension_verifier.unverifiable_prefixes)
                     self.sub_title = f"Extension baseline active, skipped {skipped_ext} unchanged extension files"
                     self._set_status_message("RUNNING", "green")
                 else:
+                    self.scanner.unverified_extension_prefixes = set()
                     self.sub_title = f"Extension baseline skipped: {msg}"
                     self._set_status_message("RUNNING", "green")
             self.total_files = len(files)
@@ -2495,11 +2519,13 @@ def main():
             if ok:
                 files, skipped_ext = extension_verifier.filter_identical_extension_files(scan_root, files, progress_cb=print)
                 ignored_files += skipped_ext
+                scanner.unverified_extension_prefixes = set(extension_verifier.unverifiable_prefixes)
                 print(
                     f"Extension baseline active; skipped {skipped_ext} unchanged extension files. "
                     f"Unverifiable extensions: {len(extension_verifier.unverifiable_extensions)}"
                 )
             else:
+                scanner.unverified_extension_prefixes = set()
                 print(f"Extension baseline skipped: {msg}")
         stats.total_files = len(files)
         
