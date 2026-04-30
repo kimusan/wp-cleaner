@@ -22,6 +22,8 @@ import hashlib
 import zipfile
 import tarfile
 import tempfile
+import pty
+import select
 import urllib.request
 import urllib.error
 import asyncio
@@ -44,7 +46,7 @@ try:
     from textual.containers import Container, Horizontal, VerticalScroll
     from textual.reactive import reactive
     from textual.screen import ModalScreen
-    from textual.widgets import Header, Footer, DataTable, Label, ProgressBar, Static, Button
+    from textual.widgets import Header, Footer, DataTable, Label, ProgressBar, Static, Button, Input
     try:
         from textual.widgets import TextArea
     except Exception:
@@ -1770,6 +1772,44 @@ if TEXTUAL_AVAILABLE:
             else:
                 self.dismiss(None)
 
+    class RemotePasswordScreen(ModalScreen):
+        BINDINGS = [
+            Binding("enter", "submit", "Connect"),
+            Binding("escape", "cancel", "Cancel"),
+        ]
+
+        def __init__(self, host_target: str):
+            super().__init__()
+            self.host_target = host_target
+
+        def compose(self) -> ComposeResult:
+            with Container(classes="popup-host"):
+                with Container(id="confirm-container", classes="popup"):
+                    yield Label(f"Enter SSH password for [b]{self.host_target}[/b]")
+                    yield Input(placeholder="Password", password=True, id="remote-password-input")
+                    with Horizontal():
+                        yield Button("Connect", id="remote-password-connect", variant="primary")
+                        yield Button("Cancel", id="remote-password-cancel")
+
+        def on_mount(self) -> None:
+            self.query_one("#remote-password-input", Input).focus()
+
+        def action_submit(self) -> None:
+            password = self.query_one("#remote-password-input", Input).value
+            if not password:
+                self.app.bell()
+                return
+            self.dismiss(password)
+
+        def action_cancel(self) -> None:
+            self.dismiss(None)
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "remote-password-connect":
+                self.action_submit()
+            else:
+                self.dismiss(None)
+
     class ScannerTUI(App):
         LOGO = """██╗    ██╗██████╗       ███████╗ ██████╗ █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗
 ██║    ██║██╔══██╗      ██╔════╝██╔════╝██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗
@@ -1865,6 +1905,7 @@ if TEXTUAL_AVAILABLE:
             audit_log_path: str = "wp-scan-remediation-audit.jsonl",
             core_verifier: Optional[WordPressCoreVerifier] = None,
             extension_verifier: Optional[WordPressExtensionVerifier] = None,
+            remote_config: Optional[RemoteSSHConfig] = None,
         ):
             super().__init__()
             self.scanner = scanner
@@ -1873,6 +1914,8 @@ if TEXTUAL_AVAILABLE:
             self.audit_log_path = Path(audit_log_path)
             self.core_verifier = core_verifier
             self.extension_verifier = extension_verifier
+            self.remote_config = remote_config
+            self.remote_collector: Optional[RemoteSSHCollector] = None
             self.signature_target_types: Dict[str, str] = {
                 sig.id: (sig.target_type or "all") for sig in self.scanner.signatures
             }
@@ -1930,7 +1973,53 @@ if TEXTUAL_AVAILABLE:
             table.add_columns("Sel", "Level", "File", "Location", "Threat", "Line")
             table.cursor_type = "row"
             table.focus()
-            self._start_scan()
+            if self.remote_config:
+                self._prepare_remote_snapshot()
+            else:
+                self._start_scan()
+
+        def _prepare_remote_snapshot(self) -> None:
+            if not self.remote_config:
+                self._start_scan()
+                return
+            if not self.remote_config.key_file and not self.remote_config.password:
+                def _after(password: Optional[str]) -> None:
+                    if not password:
+                        self.exit()
+                        return
+                    self.remote_config.password = password
+                    self._run_remote_fetch_worker()
+                self.push_screen(RemotePasswordScreen(self.remote_config.host_target), _after)
+                return
+            self._run_remote_fetch_worker()
+
+        def _run_remote_fetch_worker(self) -> None:
+            self.query_one("#sort-help", Static).update("Preparing remote SSH snapshot...")
+            self._set_status_message("Connecting to remote host...", "cyan")
+            self.run_worker(self._fetch_remote_snapshot_worker)
+
+        async def _fetch_remote_snapshot_worker(self) -> None:
+            if not self.remote_config:
+                self.call_from_thread(self._start_scan)
+                return
+            collector = RemoteSSHCollector(self.remote_config)
+            self.remote_collector = collector
+            loop = asyncio.get_running_loop()
+
+            def _progress(message: str) -> None:
+                self.call_from_thread(self._set_status_message, message, "cyan")
+                self.call_from_thread(setattr, self, "sub_title", message)
+
+            try:
+                snapshot_path = await loop.run_in_executor(None, collector.fetch_snapshot, _progress)
+            except Exception as exc:
+                self.call_from_thread(self._set_status_message, f"Remote fetch failed: {exc}", "red")
+                self.call_from_thread(lambda: self.query_one("#sort-help", Static).update("Remote fetch failed"))
+                self.call_from_thread(self.bell)
+                return
+            self.scan_path = str(snapshot_path)
+            self.call_from_thread(self._set_status_message, "Remote snapshot ready", "green")
+            self.call_from_thread(self._start_scan)
 
         def _reset_scan_state(self) -> None:
             self.findings_map.clear()
@@ -2209,6 +2298,8 @@ if TEXTUAL_AVAILABLE:
 
         def action_quit(self) -> None:
             self._stop_scan()
+            if self.remote_collector:
+                self.remote_collector.cleanup()
             self.exit()
         def action_toggle_pause(self) -> None:
             if not self.scan_running:
@@ -2547,6 +2638,7 @@ class RemoteSSHConfig:
     remote_path: str
     port: int = 22
     key_file: str = ""
+    password: str = ""
     known_hosts: str = ""
     strict_host_key_checking: bool = True
 
@@ -2558,6 +2650,8 @@ class RemoteSSHCollector:
 
     def _build_ssh_base_command(self) -> List[str]:
         cmd = ["ssh", "-p", str(self.config.port)]
+        if self.config.password:
+            cmd.append("-tt")
         if self.config.key_file:
             cmd.extend(["-i", self.config.key_file])
         if self.config.strict_host_key_checking:
@@ -2567,6 +2661,48 @@ class RemoteSSHCollector:
         if self.config.known_hosts:
             cmd.extend(["-o", f"UserKnownHostsFile={self.config.known_hosts}"])
         return cmd
+
+    def _run_ssh_with_password(self, cmd: List[str], archive_path: Path) -> Tuple[int, str]:
+        master_fd, slave_fd = pty.openpty()
+        prompt_seen = False
+        stderr_buffer: List[bytes] = []
+        try:
+            with open(archive_path, "wb") as out:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdin=slave_fd,
+                    stdout=out,
+                    stderr=subprocess.PIPE,
+                    close_fds=True,
+                )
+                os.close(slave_fd)
+                while proc.poll() is None:
+                    ready, _, _ = select.select([master_fd], [], [], 0.1)
+                    if ready:
+                        chunk = os.read(master_fd, 4096)
+                        if not chunk:
+                            continue
+                        lower = chunk.decode("utf-8", errors="ignore").lower()
+                        if "password:" in lower and not prompt_seen:
+                            os.write(master_fd, (self.config.password + "\n").encode("utf-8"))
+                            prompt_seen = True
+                    if proc.stderr:
+                        try:
+                            err = proc.stderr.read1(4096)
+                        except Exception:
+                            err = b""
+                        if err:
+                            stderr_buffer.append(err)
+                if proc.stderr:
+                    tail = proc.stderr.read()
+                    if tail:
+                        stderr_buffer.append(tail)
+                return proc.returncode or 0, b"".join(stderr_buffer).decode("utf-8", errors="ignore")
+        finally:
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
 
     @staticmethod
     def _safe_extract_tar(archive: Path, destination: Path) -> None:
@@ -2591,11 +2727,16 @@ class RemoteSSHCollector:
         cmd = ssh_cmd + [self.config.host_target, remote_cmd]
         if progress_cb:
             progress_cb(f"Fetching remote files from {self.config.remote_path}...")
-        with open(archive_path, "wb") as out:
-            proc = subprocess.run(cmd, stdout=out, stderr=subprocess.PIPE, check=False)
-        if proc.returncode != 0:
-            stderr = proc.stderr.decode("utf-8", errors="ignore").strip()
-            raise RuntimeError(f"SSH fetch failed: {stderr or f'exit code {proc.returncode}'}")
+        if self.config.password:
+            returncode, stderr = self._run_ssh_with_password(cmd, archive_path)
+        else:
+            with open(archive_path, "wb") as out:
+                proc = subprocess.run(cmd, stdout=out, stderr=subprocess.PIPE, check=False)
+            returncode = proc.returncode
+            stderr = proc.stderr.decode("utf-8", errors="ignore")
+        if returncode != 0:
+            stderr = stderr.strip()
+            raise RuntimeError(f"SSH fetch failed: {stderr or f'exit code {returncode}'}")
         if progress_cb:
             progress_cb("Extracting remote snapshot...")
         self._safe_extract_tar(archive_path, snapshot_dir)
@@ -2662,27 +2803,32 @@ def main():
 
     scan_path = args.path
     remote_collector: Optional[RemoteSSHCollector] = None
+    remote_config: Optional[RemoteSSHConfig] = None
     if args.remote_ssh:
         host_target, remote_path = parse_remote_ssh_target(args.remote_ssh)
-        config = RemoteSSHConfig(
+        remote_config = RemoteSSHConfig(
             host_target=host_target,
             remote_path=remote_path,
             port=args.remote_port,
             key_file=args.remote_key,
+            password="",
             known_hosts=args.remote_known_hosts,
             strict_host_key_checking=not args.remote_insecure_host_key,
         )
-        remote_collector = RemoteSSHCollector(config)
-        try:
-            print(f"Preparing remote snapshot from {host_target}:{remote_path} ...")
-            snapshot_path = remote_collector.fetch_snapshot(progress_cb=print)
-            scan_path = str(snapshot_path)
-            print(f"Remote snapshot ready: {scan_path}")
-        except Exception as exc:
-            if remote_collector:
-                remote_collector.cleanup()
-            print(f"Remote scan preparation failed: {exc}")
-            sys.exit(1)
+        if args.no_tui or not TEXTUAL_AVAILABLE:
+            if not args.remote_key:
+                remote_config.password = getpass.getpass(f"SSH password for {host_target}: ")
+            remote_collector = RemoteSSHCollector(remote_config)
+            try:
+                print(f"Preparing remote snapshot from {host_target}:{remote_path} ...")
+                snapshot_path = remote_collector.fetch_snapshot(progress_cb=print)
+                scan_path = str(snapshot_path)
+                print(f"Remote snapshot ready: {scan_path}")
+            except Exception as exc:
+                if remote_collector:
+                    remote_collector.cleanup()
+                print(f"Remote scan preparation failed: {exc}")
+                sys.exit(1)
 
     scanner = FileScanner(sig_manager.get_all())
     verifier = None
@@ -2903,6 +3049,7 @@ def main():
             audit_log_path=args.audit_log,
             core_verifier=verifier,
             extension_verifier=extension_verifier,
+            remote_config=remote_config,
         )
         app.run()
     if remote_collector:
