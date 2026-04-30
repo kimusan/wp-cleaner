@@ -1,34 +1,24 @@
-# wp-cleaner 
+# wp-scanner
 _By Kim Schulz <kim@schulz.dk>_
 
-Simple cleanup/scanner tool for wordpress installations that have been infected
+`wp-scanner` is a WordPress malware scanner focused on finding backdoors, crypto miners, suspicious loaders, and obfuscated payloads in WordPress file trees.
 
-
-simply add to your path and then run the command in the root of your wordpress installation.
-Lines in the output starting with :: will show what pattern the script is currently looking for.
-
-All files possible infected with be listed. It is recommended to check every one of them 
-as there can be "false positives". 
-If all files are backdoor files (new files unrelated to wordpress itself) then you can simply 
-run the script again with --delete as argument. 
 
 ## Warning
-It is your own fault if this script causes any damage by deleting important files in your wordpress
-installation. So make sure to make a backup before starting. 
+Use this tool carefully. Quarantine/delete actions can change or remove files. Always take a backup before remediation.
 
-## changelist
-v0.3:
- * added extra scanners for some of the new crypto mining malware for WP. 
-v0.2:
- * cleanup and fix --delete to work on all platforms. 
-
-v0.1:
- * Initial version
+## Features
+- Signature-based malware detection (100+ built-in signatures)
+- Heuristic detection for suspicious WordPress patterns
+- Optional WordPress core verification to skip unchanged official core files
+- Interactive Textual TUI with sortable findings, details modal with source view, filtering, export, and remediation actions
+- Headless mode with JSON/HTML report output
+- Audit logging for remediation actions
+- Restore support from quarantine via audit log
 
 ## Installation
 
 ### pip
-
 Install from the current directory:
 
 ```bash
@@ -38,11 +28,16 @@ pip install .
 Install with TUI dependencies:
 
 ```bash
-pip install ".[tui]"
+pip install 'wp-scanner[tui]'
+```
+
+For local editable/testing installs from this repository, use:
+
+```bash
+pip install '.[tui]'
 ```
 
 ### pipx
-
 Install as an isolated CLI app:
 
 ```bash
@@ -52,19 +47,89 @@ pipx install .
 Install with TUI dependencies:
 
 ```bash
+pipx install 'wp-scanner[tui]'
+```
+
+For local installs from this repository, use:
+
+```bash
 pipx install --pip-args='.[tui]' .
 ```
 
-## Usage
+If you run without TUI dependencies, the scanner falls back to headless mode automatically.
 
-Run scanner from any directory:
+## Quick Start
+Run TUI scan:
 
 ```bash
 wp-scanner /path/to/wordpress
 ```
 
-Run headless mode:
+Run headless scan:
 
 ```bash
 wp-scanner /path/to/wordpress --no-tui
 ```
+
+## Common Usage
+Headless scan with reports:
+
+```bash
+wp-scanner /path/to/wordpress --no-tui --report-json ./ --report-html ./
+```
+
+Use custom signatures:
+
+```bash
+wp-scanner /path/to/wordpress --no-tui --signatures ./custom-signatures.json
+```
+
+Verify against official WordPress core and skip unchanged core files:
+
+```bash
+wp-scanner /path/to/wordpress --verify-core
+```
+
+Offline core verification (cached core only):
+
+```bash
+wp-scanner /path/to/wordpress --verify-core --verify-core-offline
+```
+
+## Remediation (Headless)
+Quarantine infected files:
+
+```bash
+wp-scanner /path/to/wordpress --no-tui --quarantine --quarantine-dir ./quarantine --yes
+```
+
+Delete infected files:
+
+```bash
+wp-scanner /path/to/wordpress --no-tui --delete --yes
+```
+
+Restore from quarantine using audit log:
+
+```bash
+wp-scanner /path/to/wordpress --no-tui --restore --audit-log ./wp-scan-remediation-audit.jsonl --yes
+```
+
+## TUI Controls
+Main controls:
+- `q`: quit
+- `p`: pause/resume scan
+- `r`: stop/restart scan
+- `j` / `k` or arrows: move selection
+- `d` or `enter`: open details modal
+- `s`: toggle sort
+- `e`: export findings
+- `space`: select/unselect current finding
+- `a`: select/unselect all visible findings
+- `x`: quarantine selected
+- `delete`: delete selected
+- `u`: open restore modal
+
+## Notes
+- Findings can include false positives. Review critical/high findings first.
+- Core verification and remediation audit logging are intended to reduce unnecessary scanning and improve operational safety.
