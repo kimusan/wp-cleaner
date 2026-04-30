@@ -204,6 +204,49 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(result.status, ScanStatus.COMPLETED.value)
             self.assertTrue(any(f.signature_id == "WP112" for f in result.findings))
 
+    def test_scan_file_detects_admin_user_creation_flow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "users.php"
+            target.write_text(
+                "<?php\n"
+                "wp_insert_user(array('user_login' => 'eviladmin', 'role' => 'administrator'));\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP113" for f in result.findings))
+
+    def test_scan_file_detects_direct_capabilities_escalation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "meta.php"
+            target.write_text(
+                "<?php\n"
+                "update_user_meta($uid, 'wp_capabilities', array('administrator' => true));\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP114" for f in result.findings))
+
+    def test_scan_file_does_not_flag_benign_user_lookup_as_privilege_abuse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "lookup.php"
+            target.write_text(
+                "<?php\n"
+                "$u = get_user_by('id', 1);\n"
+                "if ($u) { echo $u->user_login; }\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertFalse(any(f.signature_id in {'WP113', 'WP114', 'WP115'} for f in result.findings))
+
     def test_scan_file_deduplicates_and_caps_noisy_matches(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
