@@ -1996,6 +1996,8 @@ if TEXTUAL_AVAILABLE:
             return Panel(self._render_syntax(), title=Path(self.finding.file_path).name)
 
     class DatabaseFindingDetailScreen(ModalScreen):
+        BINDINGS = [Binding("escape", "cancel", "Close")]
+
         def __init__(self, finding: DatabaseFinding):
             super().__init__()
             self.finding = finding
@@ -2014,6 +2016,9 @@ if TEXTUAL_AVAILABLE:
                         yield Static(self.finding.source_excerpt or "(no excerpt available)")
                     yield Label(f"[b]What it means:[/b] {self.finding.description}", classes="wrap")
                     yield Label(f"[b]How to remove:[/b] {self.finding.remediation}", classes="wrap")
+
+        def action_cancel(self) -> None:
+            self.dismiss()
 
     class RestoreFromQuarantineScreen(ModalScreen):
         BINDINGS = [
@@ -3631,7 +3636,9 @@ def main():
 
     db_config: Optional[DatabaseConfig] = None
     if args.scan_db:
-        can_resolve_now = (not remote_target_value) or args.no_tui or (not TEXTUAL_AVAILABLE) or args.db_only
+        can_resolve_now = (not remote_target_value) or args.no_tui or (not TEXTUAL_AVAILABLE) or (
+            args.db_only and (args.no_tui or not TEXTUAL_AVAILABLE)
+        )
         if can_resolve_now:
             if remote_config and args.db_only:
                 if remote_collector is None:
@@ -3697,7 +3704,7 @@ def main():
                 else:
                     print(f"Database preflight: FAILED - {db_msg}")
         else:
-            print("Database preflight deferred in TUI remote mode.")
+            print("Database preflight deferred to TUI runtime.")
 
     scanner = FileScanner(sig_manager.get_all())
     verifier = None
