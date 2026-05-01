@@ -335,6 +335,30 @@ def resolve_database_config(scan_root: Path, args) -> Optional[DatabaseConfig]:
     return config
 
 
+def _remote_db_preflight_command(db: DatabaseConfig) -> str:
+    mysql_pwd = f"MYSQL_PWD={shlex.quote(db.password)} " if db.password else ""
+    base_parts = [f"-u{shlex.quote(db.user)}", "-N", "-s", "-e", shlex.quote("SELECT 1"), shlex.quote(db.name)]
+    if db.socket:
+        base_parts.insert(0, f"--socket={shlex.quote(db.socket)}")
+        base_parts.insert(0, "--protocol=SOCKET")
+    else:
+        base_parts.insert(0, f"-P{int(db.port)}")
+        base_parts.insert(0, f"-h{shlex.quote(db.host)}")
+        base_parts.insert(0, "--protocol=TCP")
+    args_str = " ".join(base_parts)
+    mysql_cmd = f"{mysql_pwd}mysql {args_str}"
+    mariadb_cmd = f"{mysql_pwd}mariadb {args_str}"
+    return (
+        "if command -v mysql >/dev/null 2>&1; then "
+        f"{mysql_cmd}; "
+        "elif command -v mariadb >/dev/null 2>&1; then "
+        f"{mariadb_cmd}; "
+        "else "
+        "echo '__NO_DB_CLIENT__' >&2; exit 127; "
+        "fi"
+    )
+
+
 # =============================================================================
 # SIGNATURE DATABASE
 # =============================================================================
@@ -3069,6 +3093,25 @@ class RemoteSSHCollector:
         self._safe_extract_tar(archive_path, snapshot_dir)
         return snapshot_dir
 
+    def test_remote_database_connection(self, db_config: DatabaseConfig) -> Tuple[bool, str]:
+        """Run DB preflight on remote host so localhost/socket semantics stay remote."""
+        created_tmp = False
+        if self.work_dir is None:
+            self.work_dir = Path(tempfile.mkdtemp(prefix="wp-scanner-remote-"))
+            created_tmp = True
+        try:
+            cmd = _remote_db_preflight_command(db_config)
+            rc, out, err = self._run_remote_capture(cmd)
+            if rc == 0:
+                return True, f"Connected via remote DB client ({db_config.host or 'socket'})"
+            if rc == 127 or "__NO_DB_CLIENT__" in err:
+                return False, "Remote host is missing mysql/mariadb client binaries"
+            detail = (err or out).strip()
+            return False, detail or f"remote DB preflight failed (exit code {rc})"
+        finally:
+            if created_tmp:
+                self.cleanup()
+
     def cleanup(self) -> None:
         if self.config.keep_temp_snapshot:
             return
@@ -3214,7 +3257,11 @@ def main():
                     "(check wp-config.php or pass --db-* overrides)."
                 )
             else:
-                db_ok, db_msg = DatabaseConnector(db_config).test_connection()
+                if remote_config:
+                    remote_db_collector = remote_collector or RemoteSSHCollector(remote_config)
+                    db_ok, db_msg = remote_db_collector.test_remote_database_connection(db_config)
+                else:
+                    db_ok, db_msg = DatabaseConnector(db_config).test_connection()
                 if db_ok:
                     print(
                         "Database preflight: OK "

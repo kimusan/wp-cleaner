@@ -19,6 +19,8 @@ from wp_scanner import (
     load_remote_profile,
     parse_wp_config_database_config,
     resolve_database_config,
+    _remote_db_preflight_command,
+    DatabaseConfig,
 )
 
 
@@ -213,6 +215,36 @@ class ScannerTests(unittest.TestCase):
                 self.assertEqual(cfg.table_prefix, "wpz_")
             finally:
                 os.environ.pop("WP_SCANNER_DB_PASSWORD", None)
+
+    def test_remote_db_preflight_command_uses_tcp_defaults(self):
+        cfg = DatabaseConfig(
+            host="127.0.0.1",
+            port=3306,
+            name="wpdb",
+            user="wpuser",
+            password="secret",
+            socket="",
+            table_prefix="wp_",
+        )
+        cmd = _remote_db_preflight_command(cfg)
+        self.assertIn("--protocol=TCP", cmd)
+        self.assertIn("-h127.0.0.1", cmd)
+        self.assertIn("-P3306", cmd)
+        self.assertIn("MYSQL_PWD=", cmd)
+
+    def test_remote_db_preflight_command_uses_socket_when_configured(self):
+        cfg = DatabaseConfig(
+            host="localhost",
+            port=3306,
+            name="wpdb",
+            user="wpuser",
+            password="",
+            socket="/var/run/mysqld/mysqld.sock",
+            table_prefix="wp_",
+        )
+        cmd = _remote_db_preflight_command(cfg)
+        self.assertIn("--protocol=SOCKET", cmd)
+        self.assertIn("--socket=", cmd)
 
     def test_remote_ssh_collector_builds_secure_base_command(self):
         cfg = RemoteSSHConfig(
