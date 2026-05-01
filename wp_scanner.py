@@ -3150,6 +3150,8 @@ class RemoteSSHCollector:
     def _run_remote_capture(self, remote_cmd: str) -> Tuple[int, str, str]:
         ssh_cmd = self._build_ssh_base_command()
         if self.config.password:
+            if self.work_dir is None:
+                self.work_dir = Path(tempfile.mkdtemp(prefix="wp-scanner-remote-"))
             env = self._askpass_env()
             cmd = ["setsid"] + ssh_cmd + [self.config.host_target, remote_cmd]
             proc = subprocess.run(
@@ -3579,7 +3581,9 @@ def main():
         can_resolve_now = (not remote_target_value) or args.no_tui or (not TEXTUAL_AVAILABLE)
         if can_resolve_now:
             if remote_config and args.db_only:
-                remote_db_collector = remote_collector or RemoteSSHCollector(remote_config)
+                if remote_collector is None:
+                    remote_collector = RemoteSSHCollector(remote_config)
+                remote_db_collector = remote_collector
                 if not remote_config.key_file and not remote_config.password:
                     remote_config.password = getpass.getpass(f"SSH password for {remote_config.host_target}: ")
                 try:
@@ -3626,7 +3630,9 @@ def main():
                 )
             else:
                 if remote_config:
-                    remote_db_collector = remote_collector or RemoteSSHCollector(remote_config)
+                    if remote_collector is None:
+                        remote_collector = RemoteSSHCollector(remote_config)
+                    remote_db_collector = remote_collector
                     db_ok, db_msg = remote_db_collector.test_remote_database_connection(db_config)
                 else:
                     db_ok, db_msg = DatabaseConnector(db_config).test_connection()
@@ -3764,7 +3770,9 @@ def main():
             print("Scanning database content...")
             try:
                 if remote_config and args.db_only:
-                    remote_db_collector = remote_collector or RemoteSSHCollector(remote_config)
+                    if remote_collector is None:
+                        remote_collector = RemoteSSHCollector(remote_config)
+                    remote_db_collector = remote_collector
                     db_findings = remote_db_collector.scan_remote_database_risks(db_config)
                 else:
                     db_findings = DatabaseConnector(db_config).scan_risks()
