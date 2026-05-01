@@ -13,6 +13,7 @@ from wp_scanner import (
     parse_remote_ssh_target,
     RemoteSSHConfig,
     RemoteSSHCollector,
+    _format_remote_transfer_summary,
 )
 
 
@@ -143,6 +144,17 @@ class ScannerTests(unittest.TestCase):
         self.assertIn("/tmp/id_rsa", cmd)
         self.assertIn("StrictHostKeyChecking=yes", " ".join(cmd))
         self.assertIn("UserKnownHostsFile=/tmp/known_hosts", " ".join(cmd))
+
+    def test_remote_transfer_summary_includes_inventory_count(self):
+        cfg = RemoteSSHConfig(host_target="u@h", remote_path="/var/www")
+        collector = RemoteSSHCollector(cfg)
+        collector.last_transfer_bytes = 10 * 1024 * 1024
+        collector.last_total_bytes = 20 * 1024 * 1024
+        collector.last_elapsed_seconds = 5
+        collector.last_rate_mib_per_s = 2.0
+        collector.last_inventory_count = 123
+        summary = _format_remote_transfer_summary(collector)
+        self.assertIn("inventory: 123 files", summary)
 
     def test_custom_js_target_type_does_not_match_php(self):
         with tempfile.TemporaryDirectory() as tmp:

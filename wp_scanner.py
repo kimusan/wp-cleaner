@@ -2642,10 +2642,13 @@ def _format_remote_transfer_summary(collector: "RemoteSSHCollector") -> str:
         size_part = f"{transferred_mib:.1f}/{total_mib:.1f} MiB ({pct:.1f}%)"
     else:
         size_part = f"{transferred_mib:.1f} MiB"
-    return (
+    base = (
         f"Remote fetch: {size_part} in {_format_duration(collector.last_elapsed_seconds)} "
         f"at {collector.last_rate_mib_per_s:.1f} MiB/s"
     )
+    if collector.last_inventory_count > 0:
+        return f"{base} (inventory: {collector.last_inventory_count} files)"
+    return base
 
 
 @dataclass
@@ -2658,6 +2661,7 @@ class RemoteSSHConfig:
     known_hosts: str = ""
     strict_host_key_checking: bool = True
     keep_temp_snapshot: bool = False
+    inventory_first: bool = False
 
 
 class RemoteSSHCollector:
@@ -2668,6 +2672,7 @@ class RemoteSSHCollector:
         self.last_total_bytes: Optional[int] = None
         self.last_elapsed_seconds: float = 0.0
         self.last_rate_mib_per_s: float = 0.0
+        self.last_inventory_count: int = 0
 
     def _build_ssh_base_command(self) -> List[str]:
         cmd = ["ssh", "-p", str(self.config.port)]
@@ -2692,32 +2697,51 @@ class RemoteSSHCollector:
             cmd.extend(["-o", f"UserKnownHostsFile={self.config.known_hosts}"])
         return cmd
 
-    def _probe_remote_size(self) -> Optional[int]:
-        ssh_cmd = self._build_ssh_base_command()
-        remote_cmd = f"du -sb {shlex.quote(self.config.remote_path)} | awk '{{print $1}}'"
+    def _askpass_env(self) -> Dict[str, str]:
+        if not self.work_dir:
+            raise RuntimeError("internal error: remote work_dir not initialized")
+        askpass_script = self.work_dir / "askpass.sh"
+        askpass_script.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$WP_SCANNER_SSH_PASSWORD\"\n",
+            encoding="utf-8",
+        )
+        askpass_script.chmod(0o700)
         env = os.environ.copy()
+        env["SSH_ASKPASS"] = str(askpass_script)
+        env["SSH_ASKPASS_REQUIRE"] = "force"
+        env["DISPLAY"] = "wp-scanner:0"
+        env["WP_SCANNER_SSH_PASSWORD"] = self.config.password
+        return env
+
+    def _run_remote_capture(self, remote_cmd: str) -> Tuple[int, str, str]:
+        ssh_cmd = self._build_ssh_base_command()
         if self.config.password:
-            if not self.work_dir:
-                return None
-            askpass_script = self.work_dir / "askpass.sh"
-            askpass_script.write_text(
-                "#!/bin/sh\n"
-                "printf '%s\\n' \"$WP_SCANNER_SSH_PASSWORD\"\n",
-                encoding="utf-8",
-            )
-            askpass_script.chmod(0o700)
-            env["SSH_ASKPASS"] = str(askpass_script)
-            env["SSH_ASKPASS_REQUIRE"] = "force"
-            env["DISPLAY"] = "wp-scanner:0"
-            env["WP_SCANNER_SSH_PASSWORD"] = self.config.password
+            env = self._askpass_env()
             cmd = ["setsid"] + ssh_cmd + [self.config.host_target, remote_cmd]
-            proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, check=False)
+            proc = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                check=False,
+            )
         else:
             cmd = ssh_cmd + [self.config.host_target, remote_cmd]
             proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-        if proc.returncode != 0:
+        return (
+            proc.returncode,
+            proc.stdout.decode("utf-8", errors="ignore"),
+            proc.stderr.decode("utf-8", errors="ignore"),
+        )
+
+    def _probe_remote_size(self) -> Optional[int]:
+        remote_cmd = f"du -sb {shlex.quote(self.config.remote_path)} | awk '{{print $1}}'"
+        rc, out_raw, _err = self._run_remote_capture(remote_cmd)
+        if rc != 0:
             return None
-        out = proc.stdout.decode("utf-8", errors="ignore").strip()
+        out = out_raw.strip()
         if not out.isdigit():
             return None
         try:
@@ -2725,6 +2749,34 @@ class RemoteSSHCollector:
         except ValueError:
             return None
         return value if value > 0 else None
+
+    def _collect_remote_inventory(self, progress_cb: Optional[Callable[[str], None]] = None) -> List[str]:
+        if progress_cb:
+            progress_cb("Collecting remote file inventory...")
+        find_expr = (
+            "cd {base} && find . -type f "
+            "\\( -name '*.php' -o -name '*.phtml' -o -name '*.php5' -o -name '*.php7' -o -name '*.inc' "
+            "-o -name '*.js' -o -name '*.html' -o -name '*.htm' -o -name '*.css' -o -name '*.txt' "
+            "-o -name '*.md' -o -name '*.json' -o -name '*.xml' -o -name '*.ini' -o -name '*.conf' "
+            "-o -name '.htaccess' \\) "
+            "-not -path './.git/*' -not -path './.svn/*' -not -path './.hg/*' "
+            "-not -path './node_modules/*' -not -path './__pycache__/*' "
+            "-not -path './.idea/*' -not -path './.vscode/*' -print"
+        ).format(base=shlex.quote(self.config.remote_path))
+        rc, out, err = self._run_remote_capture(find_expr)
+        if rc != 0:
+            raise RuntimeError(f"SSH inventory failed: {err.strip() or f'exit code {rc}'}")
+        files = []
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("./"):
+                line = line[2:]
+            if line:
+                files.append(line)
+        self.last_inventory_count = len(files)
+        return files
 
     @staticmethod
     def _format_transfer_progress(transferred: int, total: Optional[int], elapsed: float) -> str:
@@ -2744,6 +2796,7 @@ class RemoteSSHCollector:
         archive_path: Path,
         env: Optional[Dict[str, str]] = None,
         progress_cb: Optional[Callable[[str], None]] = None,
+        stdin_data: Optional[bytes] = None,
     ) -> Tuple[int, str]:
         chunk_size = 1024 * 128
         transferred = 0
@@ -2753,12 +2806,15 @@ class RemoteSSHCollector:
         self.last_total_bytes = total_bytes
         proc = subprocess.Popen(
             cmd,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
             close_fds=True,
         )
+        if stdin_data is not None and proc.stdin is not None:
+            proc.stdin.write(stdin_data)
+            proc.stdin.close()
         with open(archive_path, "wb") as out:
             assert proc.stdout is not None
             while True:
@@ -2788,23 +2844,11 @@ class RemoteSSHCollector:
         cmd: List[str],
         archive_path: Path,
         progress_cb: Optional[Callable[[str], None]] = None,
+        stdin_data: Optional[bytes] = None,
     ) -> Tuple[int, str]:
-        if not self.work_dir:
-            raise RuntimeError("internal error: remote work_dir not initialized")
-        askpass_script = self.work_dir / "askpass.sh"
-        askpass_script.write_text(
-            "#!/bin/sh\n"
-            "printf '%s\\n' \"$WP_SCANNER_SSH_PASSWORD\"\n",
-            encoding="utf-8",
-        )
-        askpass_script.chmod(0o700)
-        env = os.environ.copy()
-        env["SSH_ASKPASS"] = str(askpass_script)
-        env["SSH_ASKPASS_REQUIRE"] = "force"
-        env["DISPLAY"] = "wp-scanner:0"
-        env["WP_SCANNER_SSH_PASSWORD"] = self.config.password
+        env = self._askpass_env()
         full_cmd = ["setsid"] + cmd
-        return self._stream_archive(full_cmd, archive_path, env=env, progress_cb=progress_cb)
+        return self._stream_archive(full_cmd, archive_path, env=env, progress_cb=progress_cb, stdin_data=stdin_data)
 
     @staticmethod
     def _safe_extract_tar(archive: Path, destination: Path) -> None:
@@ -2826,13 +2870,34 @@ class RemoteSSHCollector:
 
         ssh_cmd = self._build_ssh_base_command()
         remote_cmd = f"tar -C {shlex.quote(self.config.remote_path)} -cf - ."
+        stdin_data: Optional[bytes] = None
+        if self.config.inventory_first:
+            files = self._collect_remote_inventory(progress_cb=progress_cb)
+            if not files:
+                raise RuntimeError("SSH inventory returned no scan-relevant files")
+            remote_cmd = (
+                f"tar -C {shlex.quote(self.config.remote_path)} -cf - -T -"
+            )
+            stdin_data = ("\n".join(files) + "\n").encode("utf-8")
+            if progress_cb:
+                progress_cb(f"Inventory complete: {len(files)} files. Fetching selected files...")
         cmd = ssh_cmd + [self.config.host_target, remote_cmd]
         if progress_cb:
             progress_cb(f"Fetching remote files from {self.config.remote_path}...")
         if self.config.password:
-            returncode, stderr = self._run_ssh_with_password(cmd, archive_path, progress_cb=progress_cb)
+            returncode, stderr = self._run_ssh_with_password(
+                cmd,
+                archive_path,
+                progress_cb=progress_cb,
+                stdin_data=stdin_data,
+            )
         else:
-            returncode, stderr = self._stream_archive(cmd, archive_path, progress_cb=progress_cb)
+            returncode, stderr = self._stream_archive(
+                cmd,
+                archive_path,
+                progress_cb=progress_cb,
+                stdin_data=stdin_data,
+            )
         if returncode != 0:
             stderr = stderr.strip()
             raise RuntimeError(f"SSH fetch failed: {stderr or f'exit code {returncode}'}")
@@ -2880,6 +2945,7 @@ def main():
     remote_group.add_argument('--remote-known-hosts', default='', help='Known hosts file path for SSH host key verification')
     remote_group.add_argument('--remote-insecure-host-key', action='store_true', help='Disable SSH host key verification (not recommended)')
     remote_group.add_argument('--remote-keep-temp', action='store_true', help='Keep temporary remote snapshot directory after scan (debugging)')
+    remote_group.add_argument('--remote-inventory-first', action='store_true', help='Inventory remote files first and fetch only scan-relevant files')
 
     tui_group = parser.add_argument_group("TUI Mode Options")
     tui_group.add_argument('--no-tui', action='store_true', help='Disable TUI and run headless scan')
@@ -2926,6 +2992,7 @@ def main():
             known_hosts=args.remote_known_hosts,
             strict_host_key_checking=not args.remote_insecure_host_key,
             keep_temp_snapshot=args.remote_keep_temp,
+            inventory_first=args.remote_inventory_first,
         )
         if args.no_tui or not TEXTUAL_AVAILABLE:
             if not args.remote_key:
