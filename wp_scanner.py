@@ -2231,6 +2231,7 @@ if TEXTUAL_AVAILABLE:
             extension_verifier: Optional[WordPressExtensionVerifier] = None,
             remote_config: Optional["RemoteSSHConfig"] = None,
             db_config: Optional[DatabaseConfig] = None,
+            db_only: bool = False,
         ):
             super().__init__()
             self.scanner = scanner
@@ -2241,6 +2242,7 @@ if TEXTUAL_AVAILABLE:
             self.extension_verifier = extension_verifier
             self.remote_config = remote_config
             self.db_config = db_config
+            self.db_only = db_only
             self.remote_collector: Optional["RemoteSSHCollector"] = None
             self.signature_target_types: Dict[str, str] = {
                 sig.id: (sig.target_type or "all") for sig in self.scanner.signatures
@@ -2510,6 +2512,20 @@ if TEXTUAL_AVAILABLE:
 
         async def _run_scan(self) -> None:
             loop = asyncio.get_running_loop()
+            if self.db_only:
+                self.sub_title = "Scanning database..."
+                self._set_status_message("RUNNING DB", "yellow")
+                if self.db_config:
+                    try:
+                        self.db_findings = await loop.run_in_executor(None, DatabaseConnector(self.db_config).scan_risks)
+                    except Exception:
+                        self.db_findings = []
+                self._refresh_db_table()
+                self.scan_complete = True
+                self.scan_running = False
+                self._update_pause_state()
+                self.query_one("#sort-help", Static).update("File scanning disabled (--db-only)")
+                return
             self.sub_title = "Collecting files..."
             if not self.executor:
                 return
@@ -3394,6 +3410,7 @@ def main():
     remediation.add_argument('--audit-log', default='wp-scan-remediation-audit.jsonl', help='Append remediation audit log to this JSONL file')
     db_group = parser.add_argument_group("Database Scan Options")
     db_group.add_argument('--scan-db', action='store_true', help='Enable database scan preflight and DB risk scanning workflow')
+    db_group.add_argument('--db-only', action='store_true', help='Scan only the database (skip filesystem scan)')
     db_group.add_argument('--db-host', default='', help='Override database host')
     db_group.add_argument('--db-port', type=int, default=0, help='Override database port')
     db_group.add_argument('--db-name', default='', help='Override database name')
@@ -3406,6 +3423,10 @@ def main():
     selected_actions = sum(bool(x) for x in (args.quarantine, args.delete, args.restore))
     if selected_actions > 1:
         parser.error("--quarantine, --delete and --restore are mutually exclusive")
+    if args.db_only and not args.scan_db:
+        parser.error("--db-only requires --scan-db")
+    if args.db_only and (args.quarantine or args.delete):
+        parser.error("--db-only cannot be combined with --quarantine or --delete (file-only actions)")
     if args.remote_ssh and args.restore:
         parser.error("--restore operates on local audit/quarantine files and cannot be combined with --remote-ssh")
 
@@ -3553,70 +3574,75 @@ def main():
                 )
             return
         
-        print(f"Scanning {scan_path}...")
+        if args.db_only:
+            print("Running database-only scan...")
+        else:
+            print(f"Scanning {scan_path}...")
         start_time = time.time()
         stats = ScanStats()
         results = []
         db_findings: List[DatabaseFinding] = []
         
         scan_root = Path(scan_path)
-        files = scanner.collect_files(scan_root)
         ignored_files = 0
-        core_hashes: Dict[str, str] = {}
-        if verifier:
-            ok, msg = verifier.prepare(scan_root, progress_cb=print)
-            if ok:
-                files, skipped, modified = verifier.filter_identical_core_files(scan_root, files, progress_cb=print)
-                ignored_files += skipped
-                core_hashes = dict(verifier.core_hashes)
-                print(f"Core baseline active (version {verifier.version}); skipped {skipped} unchanged core files.")
-            else:
-                print(f"Core baseline skipped: {msg}")
-        if extension_verifier:
-            ok, msg = extension_verifier.prepare(scan_root, core_hashes=core_hashes, progress_cb=print)
-            if ok:
-                files, skipped_ext = extension_verifier.filter_identical_extension_files(scan_root, files, progress_cb=print)
-                ignored_files += skipped_ext
-                scanner.unverified_extension_prefixes = set(extension_verifier.unverifiable_prefixes)
-                print(
-                    f"Extension baseline active; skipped {skipped_ext} unchanged extension files. "
-                    f"Unverifiable extensions: {len(extension_verifier.unverifiable_extensions)}"
-                )
-            else:
-                scanner.unverified_extension_prefixes = set()
-                print(f"Extension baseline skipped: {msg}")
-        stats.total_files = len(files)
-        
-        with ThreadPoolExecutor(max_workers=args.threads) as executor:
-            futures = {executor.submit(scanner.scan_file, f): f for f in files}
-            for i, future in enumerate(as_completed(futures)):
-                result = future.result()
-                results.append(result)
-                stats.scanned_files += 1
-                if result.findings:
-                    # A file is infected if it has one or more findings.
-                    # We use a set to keep track of infected file paths to avoid double counting.
-                    infected_paths = {r.file_path for r in results if r.findings}
-                    stats.infected_files = len(infected_paths)
+        if not args.db_only:
+            files = scanner.collect_files(scan_root)
+            core_hashes: Dict[str, str] = {}
+            if verifier:
+                ok, msg = verifier.prepare(scan_root, progress_cb=print)
+                if ok:
+                    files, skipped, modified = verifier.filter_identical_core_files(scan_root, files, progress_cb=print)
+                    ignored_files += skipped
+                    core_hashes = dict(verifier.core_hashes)
+                    print(f"Core baseline active (version {verifier.version}); skipped {skipped} unchanged core files.")
+                else:
+                    print(f"Core baseline skipped: {msg}")
+            if extension_verifier:
+                ok, msg = extension_verifier.prepare(scan_root, core_hashes=core_hashes, progress_cb=print)
+                if ok:
+                    files, skipped_ext = extension_verifier.filter_identical_extension_files(scan_root, files, progress_cb=print)
+                    ignored_files += skipped_ext
+                    scanner.unverified_extension_prefixes = set(extension_verifier.unverifiable_prefixes)
+                    print(
+                        f"Extension baseline active; skipped {skipped_ext} unchanged extension files. "
+                        f"Unverifiable extensions: {len(extension_verifier.unverifiable_extensions)}"
+                    )
+                else:
+                    scanner.unverified_extension_prefixes = set()
+                    print(f"Extension baseline skipped: {msg}")
+            stats.total_files = len(files)
+            
+            with ThreadPoolExecutor(max_workers=args.threads) as executor:
+                futures = {executor.submit(scanner.scan_file, f): f for f in files}
+                for i, future in enumerate(as_completed(futures)):
+                    result = future.result()
+                    results.append(result)
+                    stats.scanned_files += 1
+                    if result.findings:
+                        infected_paths = {r.file_path for r in results if r.findings}
+                        stats.infected_files = len(infected_paths)
 
-                    for finding in result.findings:
-                        if finding.threat_level == 'critical': stats.critical += 1
-                        elif finding.threat_level == 'high': stats.high += 1
-                        elif finding.threat_level == 'medium': stats.medium += 1
-                        else: stats.low += 1
-                
-                progress = (i + 1) / stats.total_files * 100 if stats.total_files > 0 else 0
-                elapsed = time.time() - start_time
-                processed = i + 1
-                rate = processed / elapsed if elapsed > 0 else 0
-                remaining = stats.total_files - processed
-                eta_seconds = (remaining / rate) if rate > 0 else 0
-                sys.stdout.write(
-                    f"\rScanning... {progress:.2f}% ({processed}/{stats.total_files}) ({ignored_files} files ignored) "
-                    f"ETA: {_format_duration(eta_seconds)}"
-                )
-                sys.stdout.flush()
-        
+                        for finding in result.findings:
+                            if finding.threat_level == 'critical': stats.critical += 1
+                            elif finding.threat_level == 'high': stats.high += 1
+                            elif finding.threat_level == 'medium': stats.medium += 1
+                            else: stats.low += 1
+                    
+                    progress = (i + 1) / stats.total_files * 100 if stats.total_files > 0 else 0
+                    elapsed = time.time() - start_time
+                    processed = i + 1
+                    rate = processed / elapsed if elapsed > 0 else 0
+                    remaining = stats.total_files - processed
+                    eta_seconds = (remaining / rate) if rate > 0 else 0
+                    sys.stdout.write(
+                        f"\rScanning... {progress:.2f}% ({processed}/{stats.total_files}) ({ignored_files} files ignored) "
+                        f"ETA: {_format_duration(eta_seconds)}"
+                    )
+                    sys.stdout.flush()
+        else:
+            stats.total_files = 0
+            stats.scanned_files = 0
+
         end_time = time.time()
         stats.scan_duration_seconds = end_time - start_time
         stats.total_findings = stats.critical + stats.high + stats.medium + stats.low
@@ -3734,6 +3760,7 @@ def main():
             extension_verifier=extension_verifier,
             remote_config=remote_config,
             db_config=db_config if args.scan_db else None,
+            db_only=args.db_only,
         )
         app.run()
     if remote_collector:
