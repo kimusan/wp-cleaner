@@ -142,6 +142,33 @@ Notes:
 - In headless mode, if no SSH key is provided, password is prompted in terminal.
 - The local path argument is ignored when `--remote-ssh` is set; `/dummy` is a placeholder.
 
+Use a remote profile JSON file:
+
+```bash
+wp-scanner /dummy --remote-profile ./remote-profile.json --no-tui
+```
+
+Example `remote-profile.json`:
+
+```json
+{
+  "remote_ssh": "user@example.com:/var/www/html",
+  "port": 22,
+  "key_file": "/home/user/.ssh/id_rsa",
+  "known_hosts": "/home/user/.ssh/known_hosts",
+  "inventory_first": true,
+  "keep_temp_snapshot": false,
+  "password_env": "WP_SCANNER_SSH_PASSWORD"
+}
+```
+
+Using `password_env` (recommended over plain-text password):
+
+```bash
+export WP_SCANNER_SSH_PASSWORD='your-ssh-password'
+wp-scanner /dummy --remote-profile ./remote-profile.json --no-tui
+```
+
 ## Remediation (Headless)
 Quarantine infected files:
 
