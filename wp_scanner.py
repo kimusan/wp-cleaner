@@ -2019,6 +2019,7 @@ if TEXTUAL_AVAILABLE:
                 return
             self.scan_path = str(snapshot_path)
             self._set_status_message("Remote snapshot ready", "green")
+            self.query_one("#sort-help", Static).update(_format_remote_transfer_summary(collector))
             self._start_scan()
 
         def _reset_scan_state(self) -> None:
@@ -2632,6 +2633,21 @@ def parse_remote_ssh_target(value: str) -> Tuple[str, str]:
     return host_target, remote_path
 
 
+def _format_remote_transfer_summary(collector: "RemoteSSHCollector") -> str:
+    transferred_mib = collector.last_transfer_bytes / (1024 * 1024)
+    total = collector.last_total_bytes
+    if total and total > 0:
+        total_mib = total / (1024 * 1024)
+        pct = min(100.0, (collector.last_transfer_bytes / total) * 100.0)
+        size_part = f"{transferred_mib:.1f}/{total_mib:.1f} MiB ({pct:.1f}%)"
+    else:
+        size_part = f"{transferred_mib:.1f} MiB"
+    return (
+        f"Remote fetch: {size_part} in {_format_duration(collector.last_elapsed_seconds)} "
+        f"at {collector.last_rate_mib_per_s:.1f} MiB/s"
+    )
+
+
 @dataclass
 class RemoteSSHConfig:
     host_target: str
@@ -2641,12 +2657,17 @@ class RemoteSSHConfig:
     password: str = ""
     known_hosts: str = ""
     strict_host_key_checking: bool = True
+    keep_temp_snapshot: bool = False
 
 
 class RemoteSSHCollector:
     def __init__(self, config: RemoteSSHConfig):
         self.config = config
         self.work_dir: Optional[Path] = None
+        self.last_transfer_bytes: int = 0
+        self.last_total_bytes: Optional[int] = None
+        self.last_elapsed_seconds: float = 0.0
+        self.last_rate_mib_per_s: float = 0.0
 
     def _build_ssh_base_command(self) -> List[str]:
         cmd = ["ssh", "-p", str(self.config.port)]
@@ -2729,6 +2750,7 @@ class RemoteSSHCollector:
         started = time.time()
         last_update = 0.0
         total_bytes = self._probe_remote_size()
+        self.last_total_bytes = total_bytes
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.DEVNULL,
@@ -2753,8 +2775,12 @@ class RemoteSSHCollector:
         if proc.stderr is not None:
             stderr_data = proc.stderr.read() or b""
         returncode = proc.wait()
+        elapsed = max(0.001, time.time() - started)
+        self.last_transfer_bytes = transferred
+        self.last_elapsed_seconds = elapsed
+        self.last_rate_mib_per_s = (transferred / elapsed) / (1024 * 1024)
         if progress_cb and transferred > 0:
-            progress_cb(self._format_transfer_progress(transferred, total_bytes, max(0.001, time.time() - started)))
+            progress_cb(self._format_transfer_progress(transferred, total_bytes, elapsed))
         return returncode, stderr_data.decode("utf-8", errors="ignore")
 
     def _run_ssh_with_password(
@@ -2825,6 +2851,8 @@ class RemoteSSHCollector:
         return snapshot_dir
 
     def cleanup(self) -> None:
+        if self.config.keep_temp_snapshot:
+            return
         if self.work_dir and self.work_dir.exists():
             shutil.rmtree(self.work_dir, ignore_errors=True)
         self.work_dir = None
@@ -2851,6 +2879,7 @@ def main():
     remote_group.add_argument('--remote-key', default='', help='SSH private key file for --remote-ssh')
     remote_group.add_argument('--remote-known-hosts', default='', help='Known hosts file path for SSH host key verification')
     remote_group.add_argument('--remote-insecure-host-key', action='store_true', help='Disable SSH host key verification (not recommended)')
+    remote_group.add_argument('--remote-keep-temp', action='store_true', help='Keep temporary remote snapshot directory after scan (debugging)')
 
     tui_group = parser.add_argument_group("TUI Mode Options")
     tui_group.add_argument('--no-tui', action='store_true', help='Disable TUI and run headless scan')
@@ -2896,6 +2925,7 @@ def main():
             password="",
             known_hosts=args.remote_known_hosts,
             strict_host_key_checking=not args.remote_insecure_host_key,
+            keep_temp_snapshot=args.remote_keep_temp,
         )
         if args.no_tui or not TEXTUAL_AVAILABLE:
             if not args.remote_key:
@@ -2906,6 +2936,7 @@ def main():
                 snapshot_path = remote_collector.fetch_snapshot(progress_cb=print)
                 scan_path = str(snapshot_path)
                 print(f"Remote snapshot ready: {scan_path}")
+                print(_format_remote_transfer_summary(remote_collector))
             except Exception as exc:
                 if remote_collector:
                     remote_collector.cleanup()
@@ -3135,6 +3166,8 @@ def main():
         )
         app.run()
     if remote_collector:
+        if args.remote_keep_temp and remote_collector.work_dir:
+            print(f"Remote temp snapshot preserved at: {remote_collector.work_dir}")
         remote_collector.cleanup()
 
 if __name__ == '__main__':
