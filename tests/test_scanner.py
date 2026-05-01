@@ -262,11 +262,13 @@ class ScannerTests(unittest.TestCase):
                 matched_content="window.location=",
                 description="Suspicious redirect payload in DB content",
                 remediation="Remove redirect payload",
+                query_preview="SELECT option_name, option_value FROM wp_options WHERE option_name = 'siteurl' LIMIT 1;",
             )
         ]
         payload = ReportGenerator.generate_json_report([], stats, db_findings=db_findings)
         self.assertIn("database_findings", payload)
         self.assertEqual(len(payload["database_findings"]), 1)
+        self.assertIn("query_preview", payload["database_findings"][0])
 
     def test_remote_ssh_collector_builds_secure_base_command(self):
         cfg = RemoteSSHConfig(

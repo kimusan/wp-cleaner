@@ -214,6 +214,7 @@ class DatabaseFinding:
     description: str
     remediation: str
     source_excerpt: str = ""
+    query_preview: str = ""
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
@@ -395,6 +396,23 @@ class DatabaseConnector:
             (f"{prefix}usermeta", f"SELECT user_id, meta_key, meta_value FROM {prefix}usermeta LIMIT {int(limit_per_table)}"),
         ]
         findings: List[DatabaseFinding] = []
+        def _preview_query(table_name: str, row_ref: str, matched: str) -> str:
+            safe_ref = row_ref.replace("'", "''")
+            safe_match = matched.replace("'", "''")
+            if table_name.endswith("options"):
+                return (
+                    f"SELECT option_name, option_value FROM {table_name} WHERE option_name = '{safe_ref}' LIMIT 1;\n"
+                    f"-- UPDATE {table_name} SET option_value = REPLACE(option_value, '{safe_match}', '') WHERE option_name = '{safe_ref}';"
+                )
+            if table_name.endswith("posts"):
+                return (
+                    f"SELECT ID, post_content FROM {table_name} WHERE ID = {safe_ref} LIMIT 1;\n"
+                    f"-- UPDATE {table_name} SET post_content = REPLACE(post_content, '{safe_match}', '') WHERE ID = {safe_ref};"
+                )
+            return (
+                f"SELECT * FROM {table_name} WHERE user_id = '{safe_ref}' LIMIT 1;\n"
+                f"-- UPDATE {table_name} SET meta_value = REPLACE(meta_value, '{safe_match}', '') WHERE user_id = '{safe_ref}';"
+            )
         for table_name, query in queries:
             try:
                 rows = self._fetch_rows(query)
@@ -422,6 +440,7 @@ class DatabaseConnector:
                                 description=desc,
                                 remediation=remediation,
                                 source_excerpt=text[:1200],
+                                query_preview=_preview_query(table_name, row_ref, m.group(0)[:200]),
                             )
                         )
                         break
@@ -1033,6 +1052,7 @@ class ReportGenerator:
                 "category": f.category,
                 "matched_content": f.matched_content,
                 "source_excerpt": f.source_excerpt,
+                "query_preview": f.query_preview,
                 "description": f.description,
                 "remediation": f.remediation,
                 "timestamp": f.timestamp,
@@ -2014,6 +2034,9 @@ if TEXTUAL_AVAILABLE:
                     yield Label("[b]Source Excerpt[/b]")
                     with VerticalScroll(classes="code-view"):
                         yield Static(self.finding.source_excerpt or "(no excerpt available)")
+                    yield Label("[b]Suggested Query Preview (non-destructive)[/b]")
+                    with VerticalScroll(classes="code-view"):
+                        yield Static(self.finding.query_preview or "(no preview available)")
                     yield Label(f"[b]What it means:[/b] {self.finding.description}", classes="wrap")
                     yield Label(f"[b]How to remove:[/b] {self.finding.remediation}", classes="wrap")
 
@@ -2951,6 +2974,7 @@ if TEXTUAL_AVAILABLE:
                             "category": finding.category,
                             "matched_content": finding.matched_content,
                             "source_excerpt": finding.source_excerpt,
+                            "query_preview": finding.query_preview,
                             "description": finding.description,
                             "remediation": finding.remediation,
                             "timestamp": finding.timestamp,
@@ -3641,6 +3665,23 @@ class RemoteSSHCollector:
             (f"{prefix}usermeta", f"SELECT user_id, meta_key, meta_value FROM {prefix}usermeta LIMIT {int(limit_per_table)}"),
         ]
         findings: List[DatabaseFinding] = []
+        def _preview_query(table_name: str, row_ref: str, matched: str) -> str:
+            safe_ref = row_ref.replace("'", "''")
+            safe_match = matched.replace("'", "''")
+            if table_name.endswith("options"):
+                return (
+                    f"SELECT option_name, option_value FROM {table_name} WHERE option_name = '{safe_ref}' LIMIT 1;\n"
+                    f"-- UPDATE {table_name} SET option_value = REPLACE(option_value, '{safe_match}', '') WHERE option_name = '{safe_ref}';"
+                )
+            if table_name.endswith("posts"):
+                return (
+                    f"SELECT ID, post_content FROM {table_name} WHERE ID = {safe_ref} LIMIT 1;\n"
+                    f"-- UPDATE {table_name} SET post_content = REPLACE(post_content, '{safe_match}', '') WHERE ID = {safe_ref};"
+                )
+            return (
+                f"SELECT * FROM {table_name} WHERE user_id = '{safe_ref}' LIMIT 1;\n"
+                f"-- UPDATE {table_name} SET meta_value = REPLACE(meta_value, '{safe_match}', '') WHERE user_id = '{safe_ref}';"
+            )
         mysql_pwd = f"MYSQL_PWD={shlex.quote(db_config.password)} " if db_config.password else ""
         if db_config.socket:
             base = f"--protocol=SOCKET --socket={shlex.quote(db_config.socket)} -u{shlex.quote(db_config.user)} -N -B -r"
@@ -3682,6 +3723,7 @@ class RemoteSSHCollector:
                                 description=desc,
                                 remediation=remediation,
                                 source_excerpt=text[:1200],
+                                query_preview=_preview_query(table_name, row_ref, m.group(0)[:200]),
                             )
                         )
                         break
