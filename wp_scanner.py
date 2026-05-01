@@ -2338,7 +2338,7 @@ if TEXTUAL_AVAILABLE:
             db_table = self.query_one("#db-findings-table", DataTable)
             db_table.add_columns("Level", "Table", "Row", "Threat", "Category")
             table.focus()
-            if self.remote_config:
+            if self.remote_config and not self.db_only:
                 self._prepare_remote_snapshot()
             else:
                 self._start_scan()
@@ -2549,7 +2549,16 @@ if TEXTUAL_AVAILABLE:
                 self._set_status_message("RUNNING DB", "yellow")
                 if self.db_config:
                     try:
-                        self.db_findings = await loop.run_in_executor(None, DatabaseConnector(self.db_config).scan_risks)
+                        if self.remote_config:
+                            if self.remote_collector is None:
+                                self.remote_collector = RemoteSSHCollector(self.remote_config)
+                            self.db_findings = await loop.run_in_executor(
+                                None,
+                                self.remote_collector.scan_remote_database_risks,
+                                self.db_config,
+                            )
+                        else:
+                            self.db_findings = await loop.run_in_executor(None, DatabaseConnector(self.db_config).scan_risks)
                     except Exception:
                         self.db_findings = []
                 self._refresh_db_table()
@@ -3622,7 +3631,7 @@ def main():
 
     db_config: Optional[DatabaseConfig] = None
     if args.scan_db:
-        can_resolve_now = (not remote_target_value) or args.no_tui or (not TEXTUAL_AVAILABLE)
+        can_resolve_now = (not remote_target_value) or args.no_tui or (not TEXTUAL_AVAILABLE) or args.db_only
         if can_resolve_now:
             if remote_config and args.db_only:
                 if remote_collector is None:
@@ -3688,7 +3697,7 @@ def main():
                 else:
                     print(f"Database preflight: FAILED - {db_msg}")
         else:
-            print("Database preflight deferred in TUI remote mode (will run after remote snapshot support is wired).")
+            print("Database preflight deferred in TUI remote mode.")
 
     scanner = FileScanner(sig_manager.get_all())
     verifier = None
