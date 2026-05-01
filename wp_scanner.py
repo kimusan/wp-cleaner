@@ -44,7 +44,7 @@ try:
     from textual.containers import Container, Horizontal, VerticalScroll
     from textual.reactive import reactive
     from textual.screen import ModalScreen
-    from textual.widgets import Header, Footer, DataTable, Label, ProgressBar, Static, Button, Input
+    from textual.widgets import Header, Footer, DataTable, Label, ProgressBar, Static, Button, Input, TabbedContent, TabPane
     try:
         from textual.widgets import TextArea
     except Exception:
@@ -1985,6 +1985,8 @@ if TEXTUAL_AVAILABLE:
  ╚══╝╚══╝ ╚═╝           ╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝"""
         BINDINGS = [
             ("q", "quit", "Quit"),
+            ("1", "show_files_tab", "Files Tab"),
+            ("2", "show_db_tab", "DB Tab"),
             ("d", "show_detail", "Details"),
             ("enter", "show_detail", "Details"),
             ("p", "toggle_pause", "Pause"),
@@ -2130,8 +2132,13 @@ if TEXTUAL_AVAILABLE:
                         yield Static(Text(self.LOGO, no_wrap=True, overflow="crop"), id="logo")
                 yield Static("Status: RUNNING", id="scan-state")
                 yield ProgressBar(total=100, id="progress-bar")
-                yield DataTable(id="findings-table")
-                yield Static("Sort/Details/Export are enabled after scan completes", id="sort-help")
+                with TabbedContent(initial="tab-files", id="findings-tabs"):
+                    with TabPane("File Findings", id="tab-files"):
+                        yield DataTable(id="findings-table")
+                        yield Static("Sort/Details/Export are enabled after scan completes", id="sort-help")
+                    with TabPane("Database Findings", id="tab-db"):
+                        yield Static("Database findings will appear here when DB scanning is enabled.", id="db-help")
+                        yield Static("Current phase: DB preflight and connection foundation implemented.", id="db-status")
             yield Footer()
 
         def on_mount(self) -> None:
@@ -2143,6 +2150,18 @@ if TEXTUAL_AVAILABLE:
                 self._prepare_remote_snapshot()
             else:
                 self._start_scan()
+
+        def _is_files_tab_active(self) -> bool:
+            tabs = self.query_one("#findings-tabs", TabbedContent)
+            return tabs.active == "tab-files"
+
+        def action_show_files_tab(self) -> None:
+            tabs = self.query_one("#findings-tabs", TabbedContent)
+            tabs.active = "tab-files"
+
+        def action_show_db_tab(self) -> None:
+            tabs = self.query_one("#findings-tabs", TabbedContent)
+            tabs.active = "tab-db"
 
         def _prepare_remote_snapshot(self) -> None:
             if not self.remote_config:
@@ -2484,10 +2503,17 @@ if TEXTUAL_AVAILABLE:
                 self._start_scan()
                 self._update_pause_state()
         def action_cursor_down(self) -> None:
+            if not self._is_files_tab_active():
+                return
             self.query_one(DataTable).action_cursor_down()
         def action_cursor_up(self) -> None:
+            if not self._is_files_tab_active():
+                return
             self.query_one(DataTable).action_cursor_up()
         def action_toggle_sort(self) -> None:
+            if not self._is_files_tab_active():
+                self.bell()
+                return
             if not self.scan_complete:
                 self.bell()
                 return
@@ -2502,6 +2528,9 @@ if TEXTUAL_AVAILABLE:
             self._refresh_table()
 
         def action_export_results(self) -> None:
+            if not self._is_files_tab_active():
+                self.bell()
+                return
             if not self.scan_complete:
                 self.bell()
                 return
@@ -2571,6 +2600,9 @@ if TEXTUAL_AVAILABLE:
             return [finding] if finding else []
 
         def action_toggle_selected(self) -> None:
+            if not self._is_files_tab_active():
+                self.bell()
+                return
             if not self.scan_complete:
                 self.bell()
                 return
@@ -2590,6 +2622,9 @@ if TEXTUAL_AVAILABLE:
             self._refresh_table()
 
         def action_toggle_select_all_visible(self) -> None:
+            if not self._is_files_tab_active():
+                self.bell()
+                return
             if not self.scan_complete:
                 self.bell()
                 return
@@ -2660,6 +2695,9 @@ if TEXTUAL_AVAILABLE:
             self.push_screen(ConfirmActionScreen(label, preview), _after)
 
         def action_quarantine_selected(self) -> None:
+            if not self._is_files_tab_active():
+                self.bell()
+                return
             if not self.scan_complete:
                 self.bell()
                 return
@@ -2670,6 +2708,9 @@ if TEXTUAL_AVAILABLE:
             self._confirm_and_run("quarantine", findings)
 
         def action_delete_selected(self) -> None:
+            if not self._is_files_tab_active():
+                self.bell()
+                return
             if not self.scan_complete:
                 self.bell()
                 return
@@ -2680,6 +2721,9 @@ if TEXTUAL_AVAILABLE:
             self._confirm_and_run("delete", findings)
 
         def action_restore_selected(self) -> None:
+            if not self._is_files_tab_active():
+                self.bell()
+                return
             if not self.scan_complete:
                 self.bell()
                 return
@@ -2743,6 +2787,9 @@ if TEXTUAL_AVAILABLE:
             self._set_filter(filter_name)
 
         def action_show_detail(self) -> None:
+            if not self._is_files_tab_active():
+                self.bell()
+                return
             if not self.scan_complete:
                 self.bell()
                 return
@@ -2764,6 +2811,8 @@ if TEXTUAL_AVAILABLE:
                 self.bell()
 
         def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+            if not self._is_files_tab_active():
+                return
             if not self.scan_complete:
                 return
             row_index = event.cursor_row
