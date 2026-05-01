@@ -2,7 +2,9 @@ import tempfile
 import unittest
 import os
 import json
+import io
 from pathlib import Path
+from unittest.mock import patch
 
 from wp_scanner import (
     FileScanner,
@@ -183,6 +185,47 @@ class ScannerTests(unittest.TestCase):
         collector.last_inventory_count = 123
         summary = _format_remote_transfer_summary(collector)
         self.assertIn("inventory: 123 files", summary)
+
+    @patch("wp_scanner.RemoteSSHCollector._safe_extract_tar")
+    @patch("wp_scanner.subprocess.Popen")
+    @patch("wp_scanner.RemoteSSHCollector._probe_remote_size")
+    def test_remote_fetch_snapshot_stream_success(self, mock_probe_size, mock_popen, mock_extract):
+        mock_probe_size.return_value = 1024
+
+        class DummyProc:
+            def __init__(self):
+                self.stdout = io.BytesIO(b"fake-tar-data")
+                self.stderr = io.BytesIO(b"")
+            def wait(self):
+                return 0
+
+        mock_popen.return_value = DummyProc()
+        cfg = RemoteSSHConfig(host_target="u@h", remote_path="/var/www")
+        collector = RemoteSSHCollector(cfg)
+        with tempfile.TemporaryDirectory() as tmp:
+            collector.work_dir = Path(tmp)
+            out = collector.fetch_snapshot()
+            self.assertTrue(out.exists())
+            self.assertGreater(collector.last_transfer_bytes, 0)
+        mock_extract.assert_called_once()
+
+    @patch("wp_scanner.subprocess.Popen")
+    @patch("wp_scanner.RemoteSSHCollector._probe_remote_size")
+    def test_remote_fetch_snapshot_stream_failure_raises(self, mock_probe_size, mock_popen):
+        mock_probe_size.return_value = 1024
+
+        class DummyProc:
+            def __init__(self):
+                self.stdout = io.BytesIO(b"")
+                self.stderr = io.BytesIO(b"permission denied")
+            def wait(self):
+                return 1
+
+        mock_popen.return_value = DummyProc()
+        cfg = RemoteSSHConfig(host_target="u@h", remote_path="/var/www")
+        collector = RemoteSSHCollector(cfg)
+        with self.assertRaises(RuntimeError):
+            collector.fetch_snapshot()
 
     def test_custom_js_target_type_does_not_match_php(self):
         with tempfile.TemporaryDirectory() as tmp:
