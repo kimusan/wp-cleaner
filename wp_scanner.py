@@ -224,6 +224,12 @@ def parse_wp_config_database_config(scan_root: Path) -> Optional[DatabaseConfig]
         content = wp_config.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return None
+    return parse_wp_config_database_config_from_content(content)
+
+
+def parse_wp_config_database_config_from_content(content: str) -> Optional[DatabaseConfig]:
+    if not content:
+        return None
 
     def _extract_define(name: str) -> str:
         pattern = rf"define\s*\(\s*['\"]{re.escape(name)}['\"]\s*,\s*['\"]([^'\"]*)['\"]\s*\)"
@@ -3342,6 +3348,13 @@ class RemoteSSHCollector:
         self._safe_extract_tar(archive_path, snapshot_dir)
         return snapshot_dir
 
+    def fetch_remote_wp_config_content(self) -> str:
+        cmd = f"cat {shlex.quote(self.config.remote_path.rstrip('/'))}/wp-config.php"
+        rc, out, err = self._run_remote_capture(cmd)
+        if rc != 0:
+            raise RuntimeError(f"failed to read remote wp-config.php: {err.strip() or f'exit code {rc}'}")
+        return out
+
     def test_remote_database_connection(self, db_config: DatabaseConfig) -> Tuple[bool, str]:
         """Run DB preflight on remote host so localhost/socket semantics stay remote."""
         created_tmp = False
@@ -3360,6 +3373,67 @@ class RemoteSSHCollector:
         finally:
             if created_tmp:
                 self.cleanup()
+
+    def scan_remote_database_risks(self, db_config: DatabaseConfig, limit_per_table: int = 2000) -> List[DatabaseFinding]:
+        rules = [
+            ("DB001", "Eval/Base64 Chain", re.compile(r"eval\s*\(\s*base64_decode\s*\(", re.IGNORECASE), "critical", "backdoor", "Runtime code execution payload stored in DB content", "Remove payload and sanitize upstream write path."),
+            ("DB002", "Hidden Iframe", re.compile(r"<iframe[^>]*display\s*:\s*none", re.IGNORECASE), "high", "injection", "Hidden iframe injection in DB content", "Remove injected iframe and review editor/plugin inputs."),
+            ("DB003", "Script Redirect", re.compile(r"window\.location\s*=|meta[^>]+http-equiv\s*=\s*['\"]refresh", re.IGNORECASE), "high", "redirect", "Suspicious redirect payload in DB content", "Remove redirect payload and investigate compromised account/plugin."),
+            ("DB004", "Obfuscated Token", re.compile(r"(?:[A-Za-z0-9+/]{4}){20,}", re.IGNORECASE), "medium", "obfuscation", "Long encoded token in DB content", "Decode token and verify it belongs to legitimate application data."),
+            ("DB005", "Admin Capability Injection", re.compile(r"administrator", re.IGNORECASE), "medium", "privilege_abuse", "Administrator capability marker in user meta", "Verify role assignment is expected and remove unauthorized admin mappings."),
+        ]
+
+        prefix = db_config.table_prefix
+        queries = [
+            (f"{prefix}options", f"SELECT option_name, option_value FROM {prefix}options LIMIT {int(limit_per_table)}"),
+            (f"{prefix}posts", f"SELECT ID, post_content FROM {prefix}posts LIMIT {int(limit_per_table)}"),
+            (f"{prefix}usermeta", f"SELECT user_id, meta_key, meta_value FROM {prefix}usermeta LIMIT {int(limit_per_table)}"),
+        ]
+        findings: List[DatabaseFinding] = []
+        mysql_pwd = f"MYSQL_PWD={shlex.quote(db_config.password)} " if db_config.password else ""
+        if db_config.socket:
+            base = f"--protocol=SOCKET --socket={shlex.quote(db_config.socket)} -u{shlex.quote(db_config.user)} -N -B -r"
+        else:
+            base = f"--protocol=TCP -h{shlex.quote(db_config.host)} -P{int(db_config.port)} -u{shlex.quote(db_config.user)} -N -B -r"
+
+        for table_name, sql in queries:
+            cmd = (
+                "if command -v mysql >/dev/null 2>&1; then "
+                f"{mysql_pwd}mysql {base} -e {shlex.quote(sql)} {shlex.quote(db_config.name)}; "
+                "elif command -v mariadb >/dev/null 2>&1; then "
+                f"{mysql_pwd}mariadb {base} -e {shlex.quote(sql)} {shlex.quote(db_config.name)}; "
+                "else echo '__NO_DB_CLIENT__' >&2; exit 127; fi"
+            )
+            rc, out, _err = self._run_remote_capture(cmd)
+            if rc != 0:
+                continue
+            for line in out.splitlines():
+                parts = line.split("\t")
+                if len(parts) < 2:
+                    continue
+                row_ref = parts[0]
+                for text in parts[1:]:
+                    if not text:
+                        continue
+                    for sig_id, sig_name, pattern, threat, category, desc, remediation in rules:
+                        m = pattern.search(text)
+                        if not m:
+                            continue
+                        findings.append(
+                            DatabaseFinding(
+                                table_name=table_name,
+                                row_ref=row_ref,
+                                signature_id=sig_id,
+                                signature_name=sig_name,
+                                threat_level=threat,
+                                category=category,
+                                matched_content=m.group(0)[:200],
+                                description=desc,
+                                remediation=remediation,
+                            )
+                        )
+                        break
+        return findings
 
     def cleanup(self) -> None:
         if self.config.keep_temp_snapshot:
@@ -3484,7 +3558,7 @@ def main():
         )
         if args.restore:
             parser.error("--restore operates on local audit/quarantine files and cannot be combined with --remote-ssh")
-        if args.no_tui or not TEXTUAL_AVAILABLE:
+        if (args.no_tui or not TEXTUAL_AVAILABLE) and not (args.scan_db and args.db_only):
             if not remote_config.key_file and not remote_config.password:
                 remote_config.password = getpass.getpass(f"SSH password for {host_target}: ")
             remote_collector = RemoteSSHCollector(remote_config)
@@ -3504,7 +3578,47 @@ def main():
     if args.scan_db:
         can_resolve_now = (not remote_target_value) or args.no_tui or (not TEXTUAL_AVAILABLE)
         if can_resolve_now:
-            db_config = resolve_database_config(Path(scan_path), args)
+            if remote_config and args.db_only:
+                remote_db_collector = remote_collector or RemoteSSHCollector(remote_config)
+                if not remote_config.key_file and not remote_config.password:
+                    remote_config.password = getpass.getpass(f"SSH password for {remote_config.host_target}: ")
+                try:
+                    wp_config_content = remote_db_collector.fetch_remote_wp_config_content()
+                    db_config = parse_wp_config_database_config_from_content(wp_config_content) or DatabaseConfig()
+                    class _ArgsProxy:
+                        db_host = args.db_host
+                        db_port = args.db_port
+                        db_name = args.db_name
+                        db_user = args.db_user
+                        db_password = args.db_password
+                        db_password_env = args.db_password_env
+                        db_socket = args.db_socket
+                        db_table_prefix = args.db_table_prefix
+                    # reuse override merge logic by emulating parsed config base
+                    base = db_config
+                    if _ArgsProxy.db_host:
+                        base.host = _ArgsProxy.db_host
+                    if _ArgsProxy.db_port:
+                        base.port = _ArgsProxy.db_port
+                    if _ArgsProxy.db_name:
+                        base.name = _ArgsProxy.db_name
+                    if _ArgsProxy.db_user:
+                        base.user = _ArgsProxy.db_user
+                    if _ArgsProxy.db_socket:
+                        base.socket = _ArgsProxy.db_socket
+                        base.host = "localhost"
+                    if _ArgsProxy.db_table_prefix:
+                        base.table_prefix = _ArgsProxy.db_table_prefix
+                    password = _ArgsProxy.db_password or base.password
+                    if _ArgsProxy.db_password_env:
+                        password = os.environ.get(_ArgsProxy.db_password_env, password)
+                    base.password = password
+                    db_config = base if (base.name and base.user) else None
+                except Exception as exc:
+                    print(f"Database preflight skipped: could not read remote wp-config.php ({exc})")
+                    db_config = None
+            else:
+                db_config = resolve_database_config(Path(scan_path), args)
             if db_config is None:
                 print(
                     "Database preflight skipped: could not resolve DB credentials "
@@ -3649,7 +3763,11 @@ def main():
         if args.scan_db and db_config is not None:
             print("Scanning database content...")
             try:
-                db_findings = DatabaseConnector(db_config).scan_risks()
+                if remote_config and args.db_only:
+                    remote_db_collector = remote_collector or RemoteSSHCollector(remote_config)
+                    db_findings = remote_db_collector.scan_remote_database_risks(db_config)
+                else:
+                    db_findings = DatabaseConnector(db_config).scan_risks()
                 print(f"Database findings: {len(db_findings)}")
             except Exception as exc:
                 print(f"Database scan failed: {exc}")
