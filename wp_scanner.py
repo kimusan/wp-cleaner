@@ -2633,6 +2633,16 @@ def parse_remote_ssh_target(value: str) -> Tuple[str, str]:
     return host_target, remote_path
 
 
+def load_remote_profile(path: str) -> Dict[str, object]:
+    profile_path = Path(path)
+    if not profile_path.exists():
+        raise FileNotFoundError(f"remote profile not found: {profile_path}")
+    data = json.loads(profile_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("remote profile must be a JSON object")
+    return data
+
+
 def _format_remote_transfer_summary(collector: "RemoteSSHCollector") -> str:
     transferred_mib = collector.last_transfer_bytes / (1024 * 1024)
     total = collector.last_total_bytes
@@ -2939,6 +2949,7 @@ def main():
     general.add_argument('--verify-extensions', action='store_true', help='Pre-verify plugins/themes against extension baselines and skip unchanged files')
     general.add_argument('--verify-extensions-offline', action='store_true', help='Use only cached extension baseline data (no network download)')
     remote_group = parser.add_argument_group("Remote Scan Options")
+    remote_group.add_argument('--remote-profile', default='', help='Path to JSON remote profile with SSH settings')
     remote_group.add_argument('--remote-ssh', default='', help='Remote SSH target: user@host:/path or ssh://user@host/path')
     remote_group.add_argument('--remote-port', type=int, default=22, help='SSH port for --remote-ssh')
     remote_group.add_argument('--remote-key', default='', help='SSH private key file for --remote-ssh')
@@ -2981,21 +2992,49 @@ def main():
     scan_path = args.path
     remote_collector: Optional[RemoteSSHCollector] = None
     remote_config: Optional[RemoteSSHConfig] = None
-    if args.remote_ssh:
-        host_target, remote_path = parse_remote_ssh_target(args.remote_ssh)
+    remote_profile: Dict[str, object] = {}
+    if args.remote_profile:
+        try:
+            remote_profile = load_remote_profile(args.remote_profile)
+        except Exception as exc:
+            print(f"Failed to load remote profile: {exc}")
+            sys.exit(1)
+
+    remote_target_value = args.remote_ssh or str(remote_profile.get("remote_ssh", "")).strip()
+    if not remote_target_value:
+        host_value = str(remote_profile.get("host_target", "")).strip()
+        path_value = str(remote_profile.get("remote_path", "")).strip()
+        if host_value and path_value:
+            remote_target_value = f"{host_value}:{path_value}"
+
+    if remote_target_value:
+        host_target, remote_path = parse_remote_ssh_target(remote_target_value)
+        profile_port = int(remote_profile.get("port", 22)) if str(remote_profile.get("port", "")).strip() else 22
+        profile_key = str(remote_profile.get("key_file", "")).strip()
+        profile_known_hosts = str(remote_profile.get("known_hosts", "")).strip()
+        profile_insecure = bool(remote_profile.get("insecure_host_key", False))
+        profile_keep_temp = bool(remote_profile.get("keep_temp_snapshot", False))
+        profile_inventory_first = bool(remote_profile.get("inventory_first", False))
+        profile_password = str(remote_profile.get("password", "")).strip()
+        profile_password_env = str(remote_profile.get("password_env", "")).strip()
+        resolved_password = profile_password
+        if profile_password_env:
+            resolved_password = os.environ.get(profile_password_env, resolved_password)
         remote_config = RemoteSSHConfig(
             host_target=host_target,
             remote_path=remote_path,
-            port=args.remote_port,
-            key_file=args.remote_key,
-            password="",
-            known_hosts=args.remote_known_hosts,
-            strict_host_key_checking=not args.remote_insecure_host_key,
-            keep_temp_snapshot=args.remote_keep_temp,
-            inventory_first=args.remote_inventory_first,
+            port=args.remote_port if args.remote_port != 22 else profile_port,
+            key_file=args.remote_key or profile_key,
+            password=resolved_password,
+            known_hosts=args.remote_known_hosts or profile_known_hosts,
+            strict_host_key_checking=not (args.remote_insecure_host_key or profile_insecure),
+            keep_temp_snapshot=args.remote_keep_temp or profile_keep_temp,
+            inventory_first=args.remote_inventory_first or profile_inventory_first,
         )
+        if args.restore:
+            parser.error("--restore operates on local audit/quarantine files and cannot be combined with --remote-ssh")
         if args.no_tui or not TEXTUAL_AVAILABLE:
-            if not args.remote_key:
+            if not remote_config.key_file and not remote_config.password:
                 remote_config.password = getpass.getpass(f"SSH password for {host_target}: ")
             remote_collector = RemoteSSHCollector(remote_config)
             try:

@@ -14,6 +14,7 @@ from wp_scanner import (
     RemoteSSHConfig,
     RemoteSSHCollector,
     _format_remote_transfer_summary,
+    load_remote_profile,
 )
 
 
@@ -126,6 +127,33 @@ class ScannerTests(unittest.TestCase):
         host, path = parse_remote_ssh_target("ssh://user@example.com/var/www/html")
         self.assertEqual(host, "user@example.com")
         self.assertEqual(path, "/var/www/html")
+
+    def test_load_remote_profile_reads_json_object(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            profile = root / "remote-profile.json"
+            profile.write_text(
+                json.dumps(
+                    {
+                        "remote_ssh": "user@example.com:/var/www/html",
+                        "port": 2222,
+                        "inventory_first": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            data = load_remote_profile(str(profile))
+            self.assertEqual(data["remote_ssh"], "user@example.com:/var/www/html")
+            self.assertEqual(data["port"], 2222)
+            self.assertTrue(data["inventory_first"])
+
+    def test_load_remote_profile_rejects_non_object(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            profile = root / "remote-profile.json"
+            profile.write_text(json.dumps(["not-an-object"]), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_remote_profile(str(profile))
 
     def test_remote_ssh_collector_builds_secure_base_command(self):
         cfg = RemoteSSHConfig(
