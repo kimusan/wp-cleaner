@@ -17,6 +17,8 @@ from wp_scanner import (
     RemoteSSHCollector,
     _format_remote_transfer_summary,
     load_remote_profile,
+    parse_wp_config_database_config,
+    resolve_database_config,
 )
 
 
@@ -156,6 +158,61 @@ class ScannerTests(unittest.TestCase):
             profile.write_text(json.dumps(["not-an-object"]), encoding="utf-8")
             with self.assertRaises(ValueError):
                 load_remote_profile(str(profile))
+
+    def test_parse_wp_config_database_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wp_config = root / "wp-config.php"
+            wp_config.write_text(
+                "<?php\n"
+                "define('DB_NAME', 'wpdb');\n"
+                "define('DB_USER', 'wpuser');\n"
+                "define('DB_PASSWORD', 's3cr3t');\n"
+                "define('DB_HOST', 'db.example.com:3307');\n"
+                "$table_prefix = 'wpx_';\n",
+                encoding="utf-8",
+            )
+            cfg = parse_wp_config_database_config(root)
+            self.assertIsNotNone(cfg)
+            assert cfg is not None
+            self.assertEqual(cfg.name, "wpdb")
+            self.assertEqual(cfg.user, "wpuser")
+            self.assertEqual(cfg.password, "s3cr3t")
+            self.assertEqual(cfg.host, "db.example.com")
+            self.assertEqual(cfg.port, 3307)
+            self.assertEqual(cfg.table_prefix, "wpx_")
+
+    def test_resolve_database_config_with_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "wp-config.php").write_text(
+                "<?php\n"
+                "define('DB_NAME', 'wpdb');\n"
+                "define('DB_USER', 'wpuser');\n"
+                "define('DB_PASSWORD', 'old');\n"
+                "define('DB_HOST', 'localhost');\n",
+                encoding="utf-8",
+            )
+            os.environ["WP_SCANNER_DB_PASSWORD"] = "from_env"
+            class Args:
+                db_host = "db.internal"
+                db_port = 3310
+                db_name = ""
+                db_user = ""
+                db_password = ""
+                db_password_env = "WP_SCANNER_DB_PASSWORD"
+                db_socket = ""
+                db_table_prefix = "wpz_"
+            try:
+                cfg = resolve_database_config(root, Args)
+                self.assertIsNotNone(cfg)
+                assert cfg is not None
+                self.assertEqual(cfg.host, "db.internal")
+                self.assertEqual(cfg.port, 3310)
+                self.assertEqual(cfg.password, "from_env")
+                self.assertEqual(cfg.table_prefix, "wpz_")
+            finally:
+                os.environ.pop("WP_SCANNER_DB_PASSWORD", None)
 
     def test_remote_ssh_collector_builds_secure_base_command(self):
         cfg = RemoteSSHConfig(

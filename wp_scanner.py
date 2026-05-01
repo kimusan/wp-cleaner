@@ -191,6 +191,150 @@ class ScanStats:
     scan_duration_seconds: float = 0.0
 
 
+@dataclass
+class DatabaseConfig:
+    host: str = "localhost"
+    port: int = 3306
+    name: str = ""
+    user: str = ""
+    password: str = ""
+    socket: str = ""
+    table_prefix: str = "wp_"
+
+
+def parse_wp_config_database_config(scan_root: Path) -> Optional[DatabaseConfig]:
+    wp_config = scan_root / "wp-config.php"
+    if not wp_config.exists():
+        return None
+    try:
+        content = wp_config.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+
+    def _extract_define(name: str) -> str:
+        pattern = rf"define\s*\(\s*['\"]{re.escape(name)}['\"]\s*,\s*['\"]([^'\"]*)['\"]\s*\)"
+        match = re.search(pattern, content, flags=re.IGNORECASE)
+        return match.group(1).strip() if match else ""
+
+    db_name = _extract_define("DB_NAME")
+    db_user = _extract_define("DB_USER")
+    db_password = _extract_define("DB_PASSWORD")
+    db_host = _extract_define("DB_HOST")
+
+    prefix_match = re.search(r"\$table_prefix\s*=\s*['\"]([^'\"]+)['\"]\s*;", content, flags=re.IGNORECASE)
+    table_prefix = prefix_match.group(1).strip() if prefix_match else "wp_"
+
+    if not db_name and not db_user and not db_host:
+        return None
+
+    host = "localhost"
+    port = 3306
+    socket = ""
+    if db_host:
+        if db_host.startswith("/"):
+            socket = db_host
+            host = "localhost"
+        elif ":" in db_host:
+            host_part, port_part = db_host.rsplit(":", 1)
+            host = host_part or "localhost"
+            if port_part.isdigit():
+                port = int(port_part)
+        else:
+            host = db_host
+
+    return DatabaseConfig(
+        host=host,
+        port=port,
+        name=db_name,
+        user=db_user,
+        password=db_password,
+        socket=socket,
+        table_prefix=table_prefix or "wp_",
+    )
+
+
+class DatabaseConnector:
+    def __init__(self, config: DatabaseConfig):
+        self.config = config
+
+    def test_connection(self) -> Tuple[bool, str]:
+        """Try connecting to MySQL/MariaDB and return status + message."""
+        errors: List[str] = []
+
+        try:
+            import mysql.connector  # type: ignore
+            params = {
+                "host": self.config.host,
+                "port": self.config.port,
+                "database": self.config.name,
+                "user": self.config.user,
+                "password": self.config.password,
+                "connection_timeout": 8,
+            }
+            if self.config.socket:
+                params["unix_socket"] = self.config.socket
+                params.pop("host", None)
+                params.pop("port", None)
+            conn = mysql.connector.connect(**params)
+            try:
+                server = getattr(conn, "server_info", "") or "connected"
+                return True, f"Connected via mysql-connector ({server})"
+            finally:
+                conn.close()
+        except Exception as exc:
+            errors.append(f"mysql-connector: {exc}")
+
+        try:
+            import pymysql  # type: ignore
+            params = {
+                "host": self.config.host,
+                "port": self.config.port,
+                "database": self.config.name,
+                "user": self.config.user,
+                "password": self.config.password,
+                "connect_timeout": 8,
+            }
+            if self.config.socket:
+                params["unix_socket"] = self.config.socket
+                params.pop("host", None)
+                params.pop("port", None)
+            conn = pymysql.connect(**params)
+            try:
+                return True, "Connected via PyMySQL"
+            finally:
+                conn.close()
+        except Exception as exc:
+            errors.append(f"pymysql: {exc}")
+
+        return False, " / ".join(errors) if errors else "No supported MySQL client available"
+
+
+def resolve_database_config(scan_root: Path, args) -> Optional[DatabaseConfig]:
+    config = parse_wp_config_database_config(scan_root) or DatabaseConfig()
+    if args.db_host:
+        config.host = args.db_host
+    if args.db_port:
+        config.port = args.db_port
+    if args.db_name:
+        config.name = args.db_name
+    if args.db_user:
+        config.user = args.db_user
+    if args.db_socket:
+        config.socket = args.db_socket
+        config.host = "localhost"
+    if args.db_table_prefix:
+        config.table_prefix = args.db_table_prefix
+
+    password = args.db_password or config.password
+    if args.db_password_env:
+        password = os.environ.get(args.db_password_env, password)
+    config.password = password
+
+    if not config.name or not config.user:
+        return None
+    return config
+
+
 # =============================================================================
 # SIGNATURE DATABASE
 # =============================================================================
@@ -2972,6 +3116,16 @@ def main():
     remediation.add_argument('--restore', action='store_true', help='Restore files from quarantine using the audit log and exit')
     remediation.add_argument('--yes', action='store_true', help='Skip remediation confirmation prompt for --quarantine/--delete/--restore')
     remediation.add_argument('--audit-log', default='wp-scan-remediation-audit.jsonl', help='Append remediation audit log to this JSONL file')
+    db_group = parser.add_argument_group("Database Scan Options")
+    db_group.add_argument('--scan-db', action='store_true', help='Enable database scan preflight and DB risk scanning workflow')
+    db_group.add_argument('--db-host', default='', help='Override database host')
+    db_group.add_argument('--db-port', type=int, default=0, help='Override database port')
+    db_group.add_argument('--db-name', default='', help='Override database name')
+    db_group.add_argument('--db-user', default='', help='Override database user')
+    db_group.add_argument('--db-password', default='', help='Override database password')
+    db_group.add_argument('--db-password-env', default='', help='Read database password from environment variable')
+    db_group.add_argument('--db-socket', default='', help='Use UNIX socket for database connection')
+    db_group.add_argument('--db-table-prefix', default='', help='Override WordPress database table prefix')
     args = parser.parse_args()
     selected_actions = sum(bool(x) for x in (args.quarantine, args.delete, args.restore))
     if selected_actions > 1:
@@ -3048,6 +3202,28 @@ def main():
                     remote_collector.cleanup()
                 print(f"Remote scan preparation failed: {exc}")
                 sys.exit(1)
+
+    db_config: Optional[DatabaseConfig] = None
+    if args.scan_db:
+        can_resolve_now = (not remote_target_value) or args.no_tui or (not TEXTUAL_AVAILABLE)
+        if can_resolve_now:
+            db_config = resolve_database_config(Path(scan_path), args)
+            if db_config is None:
+                print(
+                    "Database preflight skipped: could not resolve DB credentials "
+                    "(check wp-config.php or pass --db-* overrides)."
+                )
+            else:
+                db_ok, db_msg = DatabaseConnector(db_config).test_connection()
+                if db_ok:
+                    print(
+                        "Database preflight: OK "
+                        f"(host={db_config.host or 'socket'}, db={db_config.name}, prefix={db_config.table_prefix}) - {db_msg}"
+                    )
+                else:
+                    print(f"Database preflight: FAILED - {db_msg}")
+        else:
+            print("Database preflight deferred in TUI remote mode (will run after remote snapshot support is wired).")
 
     scanner = FileScanner(sig_manager.get_all())
     verifier = None
