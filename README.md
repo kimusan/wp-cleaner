@@ -100,6 +100,48 @@ Offline core verification (cached core only):
 wp-scanner /path/to/wordpress --verify-core --verify-core-offline
 ```
 
+## Remote Scanning (SSH)
+Scan a remote WordPress tree over SSH (key-based auth):
+
+```bash
+wp-scanner /dummy --remote-ssh user@example.com:/var/www/html --remote-key ~/.ssh/id_rsa --verify-core --verify-extensions
+```
+
+Headless remote scan:
+
+```bash
+wp-scanner /dummy --remote-ssh user@example.com:/var/www/html --no-tui --report-json ./ --report-html ./
+```
+
+Inventory-first remote fetch (fetch only scan-relevant files):
+
+```bash
+wp-scanner /dummy --remote-ssh user@example.com:/var/www/html --remote-inventory-first --no-tui
+```
+
+Use a non-default SSH port and explicit known-hosts file:
+
+```bash
+wp-scanner /dummy --remote-ssh user@example.com:/var/www/html --remote-port 2222 --remote-known-hosts ~/.ssh/known_hosts
+```
+
+Keep temporary remote snapshot files for debugging:
+
+```bash
+wp-scanner /dummy --remote-ssh user@example.com:/var/www/html --remote-keep-temp --no-tui
+```
+
+Disable host key verification (not recommended, legacy environments only):
+
+```bash
+wp-scanner /dummy --remote-ssh user@example.com:/var/www/html --remote-insecure-host-key --no-tui
+```
+
+Notes:
+- In TUI mode, if no SSH key is provided, the app prompts for SSH password in a modal.
+- In headless mode, if no SSH key is provided, password is prompted in terminal.
+- The local path argument is ignored when `--remote-ssh` is set; `/dummy` is a placeholder.
+
 ## Remediation (Headless)
 Quarantine infected files:
 
