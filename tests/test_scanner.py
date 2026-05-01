@@ -269,6 +269,9 @@ class ScannerTests(unittest.TestCase):
         self.assertIn("database_findings", payload)
         self.assertEqual(len(payload["database_findings"]), 1)
         self.assertIn("query_preview", payload["database_findings"][0])
+        text_report = ReportGenerator.generate_text_report([], stats, db_findings=db_findings)
+        self.assertIn("DATABASE FINDINGS", text_report)
+        self.assertIn("Query Preview", text_report)
 
     def test_remote_ssh_collector_builds_secure_base_command(self):
         cfg = RemoteSSHConfig(

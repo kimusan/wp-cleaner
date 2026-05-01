@@ -1195,7 +1195,11 @@ class ReportGenerator:
 </html>"""
 
     @staticmethod
-    def generate_text_report(results: List[ScanResult], stats: ScanStats) -> str:
+    def generate_text_report(
+        results: List[ScanResult],
+        stats: ScanStats,
+        db_findings: Optional[List[DatabaseFinding]] = None,
+    ) -> str:
         lines = []
         lines.append("=" * 70)
         lines.append("WORDPRESS MALWARE SCAN REPORT")
@@ -1224,6 +1228,29 @@ class ReportGenerator:
         else:
             lines.append("No threats detected! ✓")
         
+        db_rows = db_findings or []
+        lines.append("DATABASE FINDINGS")
+        lines.append("-" * 70)
+        if db_rows:
+            d_critical = len([f for f in db_rows if f.threat_level == "critical"])
+            d_high = len([f for f in db_rows if f.threat_level == "high"])
+            d_medium = len([f for f in db_rows if f.threat_level == "medium"])
+            d_low = len([f for f in db_rows if f.threat_level == "low"])
+            lines.append(
+                f"Count: {len(db_rows)} (Critical: {d_critical} | High: {d_high} | Medium: {d_medium} | Low: {d_low})"
+            )
+            lines.append("")
+            for finding in db_rows[:50]:
+                lines.append(f"[{finding.threat_level.upper()}] {finding.table_name} row={finding.row_ref}")
+                lines.append(f"  -> {finding.signature_name}: {finding.description}")
+                if finding.query_preview:
+                    first_line = finding.query_preview.splitlines()[0]
+                    lines.append(f"  -> Query Preview: {first_line}")
+                lines.append("")
+        else:
+            lines.append("No database findings.")
+            lines.append("")
+
         lines.append("=" * 70)
         return '\n'.join(lines)
 
@@ -4076,7 +4103,7 @@ def main():
         print("\nScan complete.")
         
         remediation_audit = _load_audit_summary(Path(args.audit_log))
-        report = ReportGenerator.generate_text_report(results, stats)
+        report = ReportGenerator.generate_text_report(results, stats, db_findings=db_findings)
         print(report)
 
         if args.report_json:
