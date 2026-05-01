@@ -2268,6 +2268,7 @@ if TEXTUAL_AVAILABLE:
             remote_config: Optional["RemoteSSHConfig"] = None,
             db_config: Optional[DatabaseConfig] = None,
             db_only: bool = False,
+            db_overrides: Optional[Dict[str, object]] = None,
         ):
             super().__init__()
             self.scanner = scanner
@@ -2279,6 +2280,7 @@ if TEXTUAL_AVAILABLE:
             self.remote_config = remote_config
             self.db_config = db_config
             self.db_only = db_only
+            self.db_overrides = db_overrides or {}
             self.remote_collector: Optional["RemoteSSHCollector"] = None
             self.signature_target_types: Dict[str, str] = {
                 sig.id: (sig.target_type or "all") for sig in self.scanner.signatures
@@ -2345,10 +2347,96 @@ if TEXTUAL_AVAILABLE:
             db_table = self.query_one("#db-findings-table", DataTable)
             db_table.add_columns("Level", "Table", "Row", "Threat", "Category")
             table.focus()
-            if self.remote_config and not self.db_only:
+            if self.remote_config and self.db_only:
+                self._prepare_remote_db_only()
+            elif self.remote_config and not self.db_only:
                 self._prepare_remote_snapshot()
             else:
                 self._start_scan()
+
+        def _apply_db_overrides(self, config: DatabaseConfig) -> Optional[DatabaseConfig]:
+            host = str(self.db_overrides.get("host", "")).strip()
+            port = int(self.db_overrides.get("port", 0) or 0)
+            name = str(self.db_overrides.get("name", "")).strip()
+            user = str(self.db_overrides.get("user", "")).strip()
+            password = str(self.db_overrides.get("password", "")).strip()
+            password_env = str(self.db_overrides.get("password_env", "")).strip()
+            socket = str(self.db_overrides.get("socket", "")).strip()
+            table_prefix = str(self.db_overrides.get("table_prefix", "")).strip()
+            if host:
+                config.host = host
+            if port:
+                config.port = port
+            if name:
+                config.name = name
+            if user:
+                config.user = user
+            if socket:
+                config.socket = socket
+                config.host = "localhost"
+            if table_prefix:
+                config.table_prefix = table_prefix
+            merged_password = password or config.password
+            if password_env:
+                merged_password = os.environ.get(password_env, merged_password)
+            config.password = merged_password
+            if not config.name or not config.user:
+                return None
+            return config
+
+        def _prepare_remote_db_only(self) -> None:
+            if not self.remote_config:
+                self._start_scan()
+                return
+            if not self.remote_config.key_file and not self.remote_config.password:
+                def _after(password: Optional[str]) -> None:
+                    if not password:
+                        self.exit()
+                        return
+                    self.remote_config.password = password
+                    self._run_remote_db_setup_worker()
+                self.push_screen(RemotePasswordScreen(self.remote_config.host_target), _after)
+                return
+            self._run_remote_db_setup_worker()
+
+        def _run_remote_db_setup_worker(self) -> None:
+            self.query_one("#db-status", Static).update("Preparing remote database scan...")
+            self._set_status_message("Preparing remote DB...", "cyan")
+            self.run_worker(self._remote_db_setup_worker)
+
+        async def _remote_db_setup_worker(self) -> None:
+            if not self.remote_config:
+                self._start_scan()
+                return
+            if self.remote_collector is None:
+                self.remote_collector = RemoteSSHCollector(self.remote_config)
+            collector = self.remote_collector
+            loop = asyncio.get_running_loop()
+            try:
+                content = await loop.run_in_executor(None, collector.fetch_remote_wp_config_content)
+                parsed = parse_wp_config_database_config_from_content(content) or DatabaseConfig()
+                resolved = self._apply_db_overrides(parsed)
+                if resolved is None:
+                    self._set_status_message("DB setup failed: missing DB credentials", "red")
+                    self.query_one("#db-status", Static).update("DB setup failed: missing DB credentials")
+                    self.bell()
+                    return
+                ok, msg = await loop.run_in_executor(None, collector.test_remote_database_connection, resolved)
+                if not ok:
+                    self._set_status_message(f"DB preflight failed: {msg}", "red")
+                    self.query_one("#db-status", Static).update(f"DB preflight failed: {msg}")
+                    self.bell()
+                    return
+                self.db_config = resolved
+                self.query_one("#db-status", Static).update(
+                    f"DB preflight OK ({resolved.name}, {resolved.table_prefix})"
+                )
+                self._set_status_message("Remote DB preflight OK", "green")
+                self._start_scan()
+            except Exception as exc:
+                self._set_status_message(f"Remote DB setup failed: {exc}", "red")
+                self.query_one("#db-status", Static).update(f"Remote DB setup failed: {exc}")
+                self.bell()
 
         def _is_files_tab_active(self) -> bool:
             tabs = self.query_one("#findings-tabs", TabbedContent)
@@ -3949,6 +4037,16 @@ def main():
             remote_config=remote_config,
             db_config=db_config if args.scan_db else None,
             db_only=args.db_only,
+            db_overrides={
+                "host": args.db_host,
+                "port": args.db_port,
+                "name": args.db_name,
+                "user": args.db_user,
+                "password": args.db_password,
+                "password_env": args.db_password_env,
+                "socket": args.db_socket,
+                "table_prefix": args.db_table_prefix,
+            },
         )
         app.run()
     if remote_collector:
