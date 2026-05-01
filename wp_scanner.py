@@ -2181,6 +2181,8 @@ if TEXTUAL_AVAILABLE:
             ("enter", "show_detail", "Details"),
             ("p", "toggle_pause", "Pause"),
             ("s", "toggle_sort", "Sort"),
+            ("up", "cursor_up", "Up"),
+            ("down", "cursor_down", "Down"),
             ("j", "cursor_down", "Down"),
             ("k", "cursor_up", "Up"),
             ("r", "stop_restart", "Stop/Restart"),
