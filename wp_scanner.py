@@ -202,6 +202,20 @@ class DatabaseConfig:
     table_prefix: str = "wp_"
 
 
+@dataclass
+class DatabaseFinding:
+    table_name: str
+    row_ref: str
+    signature_id: str
+    signature_name: str
+    threat_level: str
+    category: str
+    matched_content: str
+    description: str
+    remediation: str
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+
+
 def parse_wp_config_database_config(scan_root: Path) -> Optional[DatabaseConfig]:
     wp_config = scan_root / "wp-config.php"
     if not wp_config.exists():
@@ -307,6 +321,103 @@ class DatabaseConnector:
             errors.append(f"pymysql: {exc}")
 
         return False, " / ".join(errors) if errors else "No supported MySQL client available"
+
+    def _connect(self):
+        try:
+            import mysql.connector  # type: ignore
+            params = {
+                "host": self.config.host,
+                "port": self.config.port,
+                "database": self.config.name,
+                "user": self.config.user,
+                "password": self.config.password,
+                "connection_timeout": 8,
+            }
+            if self.config.socket:
+                params["unix_socket"] = self.config.socket
+                params.pop("host", None)
+                params.pop("port", None)
+            conn = mysql.connector.connect(**params)
+            return conn, "mysql"
+        except Exception:
+            pass
+        import pymysql  # type: ignore
+        params = {
+            "host": self.config.host,
+            "port": self.config.port,
+            "database": self.config.name,
+            "user": self.config.user,
+            "password": self.config.password,
+            "connect_timeout": 8,
+            "charset": "utf8mb4",
+        }
+        if self.config.socket:
+            params["unix_socket"] = self.config.socket
+            params.pop("host", None)
+            params.pop("port", None)
+        conn = pymysql.connect(**params)
+        return conn, "pymysql"
+
+    def _fetch_rows(self, query: str) -> List[Tuple]:
+        conn, kind = self._connect()
+        try:
+            cur = conn.cursor()
+            try:
+                cur.execute(query)
+                rows = cur.fetchall()
+            finally:
+                cur.close()
+        finally:
+            conn.close()
+        if kind == "mysql":
+            return list(rows)
+        return list(rows)
+
+    def scan_risks(self, limit_per_table: int = 2000) -> List[DatabaseFinding]:
+        rules = [
+            ("DB001", "Eval/Base64 Chain", re.compile(r"eval\s*\(\s*base64_decode\s*\(", re.IGNORECASE), "critical", "backdoor", "Runtime code execution payload stored in DB content", "Remove payload and sanitize upstream write path."),
+            ("DB002", "Hidden Iframe", re.compile(r"<iframe[^>]*display\s*:\s*none", re.IGNORECASE), "high", "injection", "Hidden iframe injection in DB content", "Remove injected iframe and review editor/plugin inputs."),
+            ("DB003", "Script Redirect", re.compile(r"window\.location\s*=|meta[^>]+http-equiv\s*=\s*['\"]refresh", re.IGNORECASE), "high", "redirect", "Suspicious redirect payload in DB content", "Remove redirect payload and investigate compromised account/plugin."),
+            ("DB004", "Obfuscated Token", re.compile(r"(?:[A-Za-z0-9+/]{4}){20,}", re.IGNORECASE), "medium", "obfuscation", "Long encoded token in DB content", "Decode token and verify it belongs to legitimate application data."),
+            ("DB005", "Admin Capability Injection", re.compile(r"administrator", re.IGNORECASE), "medium", "privilege_abuse", "Administrator capability marker in user meta", "Verify role assignment is expected and remove unauthorized admin mappings."),
+        ]
+        prefix = self.config.table_prefix
+        queries = [
+            (f"{prefix}options", f"SELECT option_name, option_value FROM {prefix}options LIMIT {int(limit_per_table)}"),
+            (f"{prefix}posts", f"SELECT ID, post_content FROM {prefix}posts LIMIT {int(limit_per_table)}"),
+            (f"{prefix}usermeta", f"SELECT user_id, meta_key, meta_value FROM {prefix}usermeta LIMIT {int(limit_per_table)}"),
+        ]
+        findings: List[DatabaseFinding] = []
+        for table_name, query in queries:
+            try:
+                rows = self._fetch_rows(query)
+            except Exception:
+                continue
+            for row in rows:
+                row_ref = str(row[0]) if row else "row"
+                text_fields = [str(v) for v in row[1:] if v is not None]
+                for text in text_fields:
+                    if not text:
+                        continue
+                    for sig_id, sig_name, pattern, threat, category, desc, remediation in rules:
+                        m = pattern.search(text)
+                        if not m:
+                            continue
+                        findings.append(
+                            DatabaseFinding(
+                                table_name=table_name,
+                                row_ref=row_ref,
+                                signature_id=sig_id,
+                                signature_name=sig_name,
+                                threat_level=threat,
+                                category=category,
+                                matched_content=m.group(0)[:200],
+                                description=desc,
+                                remediation=remediation,
+                            )
+                        )
+                        break
+        return findings
 
 
 def resolve_database_config(scan_root: Path, args) -> Optional[DatabaseConfig]:
@@ -870,6 +981,7 @@ class ReportGenerator:
         results: List[ScanResult],
         stats: ScanStats,
         remediation_audit: Optional[Dict] = None,
+        db_findings: Optional[List[DatabaseFinding]] = None,
     ) -> Dict:
         payload = {
             "generated_at": datetime.now().isoformat(),
@@ -903,6 +1015,21 @@ class ReportGenerator:
         }
         if remediation_audit is not None:
             payload["remediation_audit"] = remediation_audit
+        payload["database_findings"] = [
+            {
+                "table_name": f.table_name,
+                "row_ref": f.row_ref,
+                "signature_id": f.signature_id,
+                "signature_name": f.signature_name,
+                "threat_level": f.threat_level,
+                "category": f.category,
+                "matched_content": f.matched_content,
+                "description": f.description,
+                "remediation": f.remediation,
+                "timestamp": f.timestamp,
+            }
+            for f in (db_findings or [])
+        ]
         return payload
 
     @staticmethod
@@ -910,6 +1037,7 @@ class ReportGenerator:
         results: List[ScanResult],
         stats: ScanStats,
         remediation_audit: Optional[Dict] = None,
+        db_findings: Optional[List[DatabaseFinding]] = None,
     ) -> str:
         findings = ReportGenerator.findings_sorted(results)
         rows = []
@@ -930,6 +1058,22 @@ class ReportGenerator:
             )
 
         findings_table = "\n".join(rows) if rows else "<tr><td colspan='9'>No threats detected.</td></tr>"
+        db_rows = []
+        for finding in (db_findings or []):
+            severity_class = f"sev-{finding.threat_level}"
+            db_rows.append(
+                "<tr>"
+                f"<td class='{severity_class}'>{html.escape(finding.threat_level.upper())}</td>"
+                f"<td>{html.escape(finding.table_name)}</td>"
+                f"<td>{html.escape(finding.row_ref)}</td>"
+                f"<td>{html.escape(finding.signature_id)}</td>"
+                f"<td>{html.escape(finding.signature_name)}</td>"
+                f"<td>{html.escape(finding.category)}</td>"
+                f"<td>{html.escape(finding.description)}</td>"
+                f"<td>{html.escape(finding.remediation)}</td>"
+                "</tr>"
+            )
+        db_findings_table = "\n".join(db_rows) if db_rows else "<tr><td colspan='8'>No database findings.</td></tr>"
         remediation_html = ""
         if remediation_audit:
             summary = remediation_audit.get("summary", {})
@@ -1003,6 +1147,18 @@ class ReportGenerator:
     </thead>
     <tbody>
       {findings_table}
+    </tbody>
+  </table>
+  <h2>Database Findings</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Severity</th><th>Table</th><th>Row</th><th>Signature ID</th>
+        <th>Threat</th><th>Category</th><th>Description</th><th>Remediation</th>
+      </tr>
+    </thead>
+    <tbody>
+      {db_findings_table}
     </tbody>
   </table>
 {remediation_html}
@@ -2074,6 +2230,7 @@ if TEXTUAL_AVAILABLE:
             core_verifier: Optional[WordPressCoreVerifier] = None,
             extension_verifier: Optional[WordPressExtensionVerifier] = None,
             remote_config: Optional["RemoteSSHConfig"] = None,
+            db_config: Optional[DatabaseConfig] = None,
         ):
             super().__init__()
             self.scanner = scanner
@@ -2083,6 +2240,7 @@ if TEXTUAL_AVAILABLE:
             self.core_verifier = core_verifier
             self.extension_verifier = extension_verifier
             self.remote_config = remote_config
+            self.db_config = db_config
             self.remote_collector: Optional["RemoteSSHCollector"] = None
             self.signature_target_types: Dict[str, str] = {
                 sig.id: (sig.target_type or "all") for sig in self.scanner.signatures
@@ -2091,6 +2249,7 @@ if TEXTUAL_AVAILABLE:
             self.finding_rows: List[Tuple[str, Finding]] = []
             self.visible_rows: List[Tuple[str, Finding]] = []
             self.selected_keys: Set[str] = set()
+            self.db_findings: List[DatabaseFinding] = []
             self.scan_complete = False
             self.scan_running = False
             self.executor: Optional[ThreadPoolExecutor] = None
@@ -2137,14 +2296,16 @@ if TEXTUAL_AVAILABLE:
                         yield DataTable(id="findings-table")
                         yield Static("Sort/Details/Export are enabled after scan completes", id="sort-help")
                     with TabPane("Database Findings", id="tab-db"):
-                        yield Static("Database findings will appear here when DB scanning is enabled.", id="db-help")
-                        yield Static("Current phase: DB preflight and connection foundation implemented.", id="db-status")
+                        yield DataTable(id="db-findings-table")
+                        yield Static("Database findings will appear here when DB scanning is enabled.", id="db-status")
             yield Footer()
 
         def on_mount(self) -> None:
             table = self.query_one(DataTable)
             table.add_columns("Sel", "Level", "File", "Location", "Threat", "Line")
             table.cursor_type = "row"
+            db_table = self.query_one("#db-findings-table", DataTable)
+            db_table.add_columns("Level", "Table", "Row", "Threat", "Category")
             table.focus()
             if self.remote_config:
                 self._prepare_remote_snapshot()
@@ -2162,6 +2323,17 @@ if TEXTUAL_AVAILABLE:
         def action_show_db_tab(self) -> None:
             tabs = self.query_one("#findings-tabs", TabbedContent)
             tabs.active = "tab-db"
+
+        def _refresh_db_table(self) -> None:
+            table = self.query_one("#db-findings-table", DataTable)
+            table.clear()
+            for finding in self.db_findings:
+                sev = f"[{SEVERITY_STYLES.get(finding.threat_level,'white')}]{finding.threat_level.upper()}[/]"
+                table.add_row(sev, finding.table_name, finding.row_ref, finding.signature_name, finding.category)
+            if not self.db_findings:
+                self.query_one("#db-status", Static).update("No database findings.")
+            else:
+                self.query_one("#db-status", Static).update(f"Database findings: {len(self.db_findings)}")
 
         def _prepare_remote_snapshot(self) -> None:
             if not self.remote_config:
@@ -2451,6 +2623,18 @@ if TEXTUAL_AVAILABLE:
                     task.cancel()
                 self.sub_title = "■ Scan stopped"
             else:
+                if self.db_config and self.executor:
+                    self.sub_title = "Scanning database..."
+                    self._set_status_message("RUNNING DB", "yellow")
+                    try:
+                        db_findings = await loop.run_in_executor(
+                            self.executor,
+                            DatabaseConnector(self.db_config).scan_risks,
+                        )
+                    except Exception:
+                        db_findings = []
+                    self.db_findings = db_findings
+                    self._refresh_db_table()
                 self.scan_complete = True
                 self.sub_title = "✓ Scan Complete"
                 self.query_one("#sort-help", Static).update("Sort: severity | Filter: all (s=sort, d/enter=details, e=export)")
@@ -3373,6 +3557,7 @@ def main():
         start_time = time.time()
         stats = ScanStats()
         results = []
+        db_findings: List[DatabaseFinding] = []
         
         scan_root = Path(scan_path)
         files = scanner.collect_files(scan_root)
@@ -3435,6 +3620,13 @@ def main():
         end_time = time.time()
         stats.scan_duration_seconds = end_time - start_time
         stats.total_findings = stats.critical + stats.high + stats.medium + stats.low
+        if args.scan_db and db_config is not None:
+            print("Scanning database content...")
+            try:
+                db_findings = DatabaseConnector(db_config).scan_risks()
+                print(f"Database findings: {len(db_findings)}")
+            except Exception as exc:
+                print(f"Database scan failed: {exc}")
         print("\nScan complete.")
         
         remediation_audit = _load_audit_summary(Path(args.audit_log))
@@ -3442,7 +3634,7 @@ def main():
         print(report)
 
         if args.report_json:
-            json_report = ReportGenerator.generate_json_report(results, stats, remediation_audit=remediation_audit)
+            json_report = ReportGenerator.generate_json_report(results, stats, remediation_audit=remediation_audit, db_findings=db_findings)
             report_path = _resolve_report_output_path(
                 args.report_json,
                 extension="json",
@@ -3452,7 +3644,7 @@ def main():
             print(f"JSON report written: {report_path}")
 
         if args.report_html:
-            html_report = ReportGenerator.generate_html_report(results, stats, remediation_audit=remediation_audit)
+            html_report = ReportGenerator.generate_html_report(results, stats, remediation_audit=remediation_audit, db_findings=db_findings)
             report_path = _resolve_report_output_path(
                 args.report_html,
                 extension="html",
@@ -3541,6 +3733,7 @@ def main():
             core_verifier=verifier,
             extension_verifier=extension_verifier,
             remote_config=remote_config,
+            db_config=db_config if args.scan_db else None,
         )
         app.run()
     if remote_collector:

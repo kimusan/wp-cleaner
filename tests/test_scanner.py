@@ -21,6 +21,9 @@ from wp_scanner import (
     resolve_database_config,
     _remote_db_preflight_command,
     DatabaseConfig,
+    DatabaseFinding,
+    ReportGenerator,
+    ScanStats,
 )
 
 
@@ -245,6 +248,25 @@ class ScannerTests(unittest.TestCase):
         cmd = _remote_db_preflight_command(cfg)
         self.assertIn("--protocol=SOCKET", cmd)
         self.assertIn("--socket=", cmd)
+
+    def test_report_generator_includes_database_findings(self):
+        stats = ScanStats()
+        db_findings = [
+            DatabaseFinding(
+                table_name="wp_options",
+                row_ref="siteurl",
+                signature_id="DB003",
+                signature_name="Script Redirect",
+                threat_level="high",
+                category="redirect",
+                matched_content="window.location=",
+                description="Suspicious redirect payload in DB content",
+                remediation="Remove redirect payload",
+            )
+        ]
+        payload = ReportGenerator.generate_json_report([], stats, db_findings=db_findings)
+        self.assertIn("database_findings", payload)
+        self.assertEqual(len(payload["database_findings"]), 1)
 
     def test_remote_ssh_collector_builds_secure_base_command(self):
         cfg = RemoteSSHConfig(
