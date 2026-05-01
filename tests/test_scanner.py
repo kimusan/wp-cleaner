@@ -21,6 +21,7 @@ from wp_scanner import (
     resolve_database_config,
     _remote_db_preflight_command,
     DatabaseConfig,
+    DatabaseConnector,
     DatabaseFinding,
     ReportGenerator,
     ScanStats,
@@ -296,6 +297,54 @@ class ScannerTests(unittest.TestCase):
             self.assertIn("wp-scanner DB remediation query preview", content)
             self.assertIn("DB003", content)
             self.assertIn("SELECT option_name FROM wp_options", content)
+
+    def test_database_scan_risks_clean_fixture_has_no_findings(self):
+        cfg = DatabaseConfig(name="wpdb", user="wpuser")
+        connector = DatabaseConnector(cfg)
+        clean_rows = {
+            "wp_options": [("siteurl", "https://example.com"), ("home", "https://example.com")],
+            "wp_posts": [(1, "<p>Hello world</p>")],
+            "wp_usermeta": [(1, "nickname", "editor")],
+        }
+
+        def _fake_fetch(query: str):
+            if " from wp_options " in query.lower():
+                return clean_rows["wp_options"]
+            if " from wp_posts " in query.lower():
+                return clean_rows["wp_posts"]
+            if " from wp_usermeta " in query.lower():
+                return clean_rows["wp_usermeta"]
+            return []
+
+        with patch.object(connector, "_fetch_rows", side_effect=_fake_fetch):
+            findings = connector.scan_risks(limit_per_table=100)
+        self.assertEqual(findings, [])
+
+    def test_database_scan_risks_infected_fixture_detects_redirect(self):
+        cfg = DatabaseConfig(name="wpdb", user="wpuser")
+        connector = DatabaseConnector(cfg)
+        infected_rows = {
+            "wp_options": [("siteurl", "<script>window.location='https://evil.example'</script>")],
+            "wp_posts": [],
+            "wp_usermeta": [],
+        }
+
+        def _fake_fetch(query: str):
+            if " from wp_options " in query.lower():
+                return infected_rows["wp_options"]
+            if " from wp_posts " in query.lower():
+                return infected_rows["wp_posts"]
+            if " from wp_usermeta " in query.lower():
+                return infected_rows["wp_usermeta"]
+            return []
+
+        with patch.object(connector, "_fetch_rows", side_effect=_fake_fetch):
+            findings = connector.scan_risks(limit_per_table=100)
+        self.assertEqual(len(findings), 1)
+        finding = findings[0]
+        self.assertEqual(finding.signature_id, "DB003")
+        self.assertIn("window.location", finding.matched_content)
+        self.assertIn("SELECT option_name, option_value FROM wp_options", finding.query_preview)
 
     def test_remote_ssh_collector_builds_secure_base_command(self):
         cfg = RemoteSSHConfig(
