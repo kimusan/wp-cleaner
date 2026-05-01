@@ -24,6 +24,7 @@ from wp_scanner import (
     DatabaseFinding,
     ReportGenerator,
     ScanStats,
+    _write_db_query_preview_file,
 )
 
 
@@ -272,6 +273,29 @@ class ScannerTests(unittest.TestCase):
         text_report = ReportGenerator.generate_text_report([], stats, db_findings=db_findings)
         self.assertIn("DATABASE FINDINGS", text_report)
         self.assertIn("Query Preview", text_report)
+
+    def test_write_db_query_preview_file_outputs_sql(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "db-preview.sql"
+            db_findings = [
+                DatabaseFinding(
+                    table_name="wp_options",
+                    row_ref="siteurl",
+                    signature_id="DB003",
+                    signature_name="Script Redirect",
+                    threat_level="high",
+                    category="redirect",
+                    matched_content="window.location=",
+                    description="Suspicious redirect payload in DB content",
+                    remediation="Remove redirect payload",
+                    query_preview="SELECT option_name FROM wp_options WHERE option_name='siteurl';",
+                )
+            ]
+            _write_db_query_preview_file(db_findings, out)
+            content = out.read_text(encoding="utf-8")
+            self.assertIn("wp-scanner DB remediation query preview", content)
+            self.assertIn("DB003", content)
+            self.assertIn("SELECT option_name FROM wp_options", content)
 
     def test_remote_ssh_collector_builds_secure_base_command(self):
         cfg = RemoteSSHConfig(

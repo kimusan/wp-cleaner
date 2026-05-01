@@ -1263,6 +1263,27 @@ def _resolve_report_output_path(raw_path: str, extension: str, stem_prefix: str)
     return target
 
 
+def _write_db_query_preview_file(db_findings: List[DatabaseFinding], output_path: Path) -> None:
+    lines: List[str] = []
+    lines.append("-- wp-scanner DB remediation query preview")
+    lines.append(f"-- generated_at: {datetime.now().isoformat()}")
+    lines.append("-- NOTE: Review carefully before executing any UPDATE statements.")
+    lines.append("")
+    if not db_findings:
+        lines.append("-- No database findings.")
+    else:
+        for idx, finding in enumerate(db_findings, start=1):
+            lines.append(f"-- [{idx}] {finding.threat_level.upper()} {finding.signature_id} {finding.signature_name}")
+            lines.append(f"-- table={finding.table_name} row_ref={finding.row_ref} category={finding.category}")
+            lines.append(f"-- description={finding.description}")
+            if finding.query_preview:
+                lines.append(finding.query_preview)
+            else:
+                lines.append("-- (no query preview available)")
+            lines.append("")
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _collect_infected_paths(results: List[ScanResult]) -> List[Path]:
     infected = sorted({Path(r.file_path) for r in results if r.findings})
     return infected
@@ -3814,6 +3835,7 @@ def main():
     db_group.add_argument('--db-password-env', default='', help='Read database password from environment variable')
     db_group.add_argument('--db-socket', default='', help='Use UNIX socket for database connection')
     db_group.add_argument('--db-table-prefix', default='', help='Override WordPress database table prefix')
+    db_group.add_argument('--db-query-preview-file', default='', help='Write non-destructive DB query previews to this .sql file')
     args = parser.parse_args()
     selected_actions = sum(bool(x) for x in (args.quarantine, args.delete, args.restore))
     if selected_actions > 1:
@@ -4098,6 +4120,14 @@ def main():
                 else:
                     db_findings = DatabaseConnector(db_config).scan_risks()
                 print(f"Database findings: {len(db_findings)}")
+                if args.db_query_preview_file:
+                    out_path = _resolve_report_output_path(
+                        args.db_query_preview_file,
+                        extension="sql",
+                        stem_prefix="wp-scan-db-query-preview",
+                    )
+                    _write_db_query_preview_file(db_findings, out_path)
+                    print(f"DB query preview file written: {out_path}")
             except Exception as exc:
                 print(f"Database scan failed: {exc}")
         print("\nScan complete.")
