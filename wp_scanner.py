@@ -2181,6 +2181,7 @@ if TEXTUAL_AVAILABLE:
             ("enter", "show_detail", "Details"),
             ("p", "toggle_pause", "Pause"),
             ("s", "toggle_sort", "Sort"),
+            ("f", "toggle_db_filter", "DB Filter"),
             ("up", "cursor_up", "Up"),
             ("down", "cursor_down", "Down"),
             ("j", "cursor_down", "Down"),
@@ -2290,6 +2291,7 @@ if TEXTUAL_AVAILABLE:
             self.visible_rows: List[Tuple[str, Finding]] = []
             self.selected_keys: Set[str] = set()
             self.db_findings: List[DatabaseFinding] = []
+            self.db_visible_findings: List[DatabaseFinding] = []
             self.scan_complete = False
             self.scan_running = False
             self.executor: Optional[ThreadPoolExecutor] = None
@@ -2301,6 +2303,10 @@ if TEXTUAL_AVAILABLE:
             self._sorting_active = False
             self._severity_filters = ["all", "critical", "high", "medium", "low"]
             self._severity_filter_index = 0
+            self._db_sort_columns = ["severity", "table", "category"]
+            self._db_sort_index = 0
+            self._db_filter_levels = ["all", "critical", "high", "medium", "low"]
+            self._db_filter_index = 0
 
         def compose(self) -> ComposeResult:
             yield Header()
@@ -2336,6 +2342,13 @@ if TEXTUAL_AVAILABLE:
                         yield DataTable(id="findings-table")
                         yield Static("Sort/Details/Export are enabled after scan completes", id="sort-help")
                     with TabPane("Database Findings", id="tab-db"):
+                        with Horizontal(id="db-filter-row"):
+                            yield Label("DB:")
+                            yield Button("All", id="db-filter-all")
+                            yield Button("Critical", id="db-filter-critical")
+                            yield Button("High", id="db-filter-high")
+                            yield Button("Medium", id="db-filter-medium")
+                            yield Button("Low", id="db-filter-low")
                         yield DataTable(id="db-findings-table")
                         yield Static("Database findings will appear here when DB scanning is enabled.", id="db-status")
             yield Footer()
@@ -2346,6 +2359,7 @@ if TEXTUAL_AVAILABLE:
             table.cursor_type = "row"
             db_table = self.query_one("#db-findings-table", DataTable)
             db_table.add_columns("Level", "Table", "Row", "Threat", "Category")
+            self._refresh_db_filter_buttons()
             table.focus()
             if self.remote_config and self.db_only:
                 self._prepare_remote_db_only()
@@ -2450,19 +2464,64 @@ if TEXTUAL_AVAILABLE:
             tabs = self.query_one("#findings-tabs", TabbedContent)
             tabs.active = "tab-db"
 
+        def _db_sort_key(self, finding: DatabaseFinding) -> Tuple:
+            key = self._db_sort_columns[self._db_sort_index]
+            if key == "severity":
+                return (SEVERITY_RANK.get(finding.threat_level, 99), finding.table_name, finding.row_ref)
+            if key == "table":
+                return (finding.table_name.lower(), SEVERITY_RANK.get(finding.threat_level, 99), finding.row_ref)
+            return (finding.category.lower(), SEVERITY_RANK.get(finding.threat_level, 99), finding.table_name)
+
+        def _refresh_db_filter_buttons(self) -> None:
+            selected = self._db_filter_levels[self._db_filter_index]
+            for level in self._db_filter_levels:
+                btn = self.query_one(f"#db-filter-{level}", Button)
+                if level == selected:
+                    btn.label = f"[b]{level.capitalize()}[/b]"
+                    btn.variant = "primary"
+                else:
+                    btn.label = level.capitalize()
+                    btn.variant = "default"
+
         def _refresh_db_table(self) -> None:
             table = self.query_one("#db-findings-table", DataTable)
             table.clear()
-            for finding in self.db_findings:
+            level_filter = self._db_filter_levels[self._db_filter_index]
+            rows = list(self.db_findings)
+            if level_filter != "all":
+                rows = [f for f in rows if f.threat_level == level_filter]
+            rows.sort(key=self._db_sort_key)
+            self.db_visible_findings = rows
+            for finding in rows:
                 sev = f"[{SEVERITY_STYLES.get(finding.threat_level,'white')}]{finding.threat_level.upper()}[/]"
                 table.add_row(sev, finding.table_name, finding.row_ref, finding.signature_name, finding.category)
             if not self.db_findings:
                 self.query_one("#db-status", Static).update("No database findings.")
             else:
-                self.query_one("#db-status", Static).update(f"Database findings: {len(self.db_findings)}")
+                c = len([f for f in self.db_findings if f.threat_level == "critical"])
+                h = len([f for f in self.db_findings if f.threat_level == "high"])
+                m = len([f for f in self.db_findings if f.threat_level == "medium"])
+                l = len([f for f in self.db_findings if f.threat_level == "low"])
+                self.query_one("#db-status", Static).update(
+                    f"Database findings: {len(self.db_findings)} (showing {len(rows)}) | "
+                    f"[#ff4d4f]Critical: {c}[/]  [#ff9f1a]High: {h}[/]  [#ffd166]Medium: {m}[/]  [#66d9ef]Low: {l}[/]"
+                )
                 table.cursor_type = "row"
                 if table.row_count > 0:
                     table.cursor_coordinate = (0, 0)
+            self._refresh_db_filter_buttons()
+
+        def _set_db_filter(self, level: str) -> None:
+            if level not in self._db_filter_levels:
+                return
+            self._db_filter_index = self._db_filter_levels.index(level)
+            self._refresh_db_table()
+
+        def action_toggle_db_filter(self) -> None:
+            if self._is_files_tab_active():
+                return
+            self._db_filter_index = (self._db_filter_index + 1) % len(self._db_filter_levels)
+            self._refresh_db_table()
 
         def _prepare_remote_snapshot(self) -> None:
             if not self.remote_config:
@@ -2850,7 +2909,11 @@ if TEXTUAL_AVAILABLE:
                 self.query_one("#db-findings-table", DataTable).action_cursor_up()
         def action_toggle_sort(self) -> None:
             if not self._is_files_tab_active():
-                self.bell()
+                if not self.db_findings:
+                    self.bell()
+                    return
+                self._db_sort_index = (self._db_sort_index + 1) % len(self._db_sort_columns)
+                self._refresh_db_table()
                 return
             if not self.scan_complete:
                 self.bell()
@@ -2867,7 +2930,39 @@ if TEXTUAL_AVAILABLE:
 
         def action_export_results(self) -> None:
             if not self._is_files_tab_active():
-                self.bell()
+                if not self.scan_complete:
+                    self.bell()
+                    return
+                if not self.db_findings:
+                    self.bell()
+                    return
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                json_path = Path(f"wp-scan-db-findings-{timestamp}.json")
+                csv_path = Path(f"wp-scan-db-findings-{timestamp}.csv")
+                rows = []
+                for finding in self.db_visible_findings:
+                    rows.append(
+                        {
+                            "table_name": finding.table_name,
+                            "row_ref": finding.row_ref,
+                            "signature_id": finding.signature_id,
+                            "signature_name": finding.signature_name,
+                            "threat_level": finding.threat_level,
+                            "category": finding.category,
+                            "matched_content": finding.matched_content,
+                            "source_excerpt": finding.source_excerpt,
+                            "description": finding.description,
+                            "remediation": finding.remediation,
+                            "timestamp": finding.timestamp,
+                        }
+                    )
+                with open(json_path, "w", encoding="utf-8") as jf:
+                    json.dump(rows, jf, indent=2)
+                with open(csv_path, "w", encoding="utf-8", newline="") as cf:
+                    writer = csv.DictWriter(cf, fieldnames=list(rows[0].keys()))
+                    writer.writeheader()
+                    writer.writerows(rows)
+                self.query_one("#db-status", Static).update(f"Exported DB findings: {json_path.name}, {csv_path.name}")
                 return
             if not self.scan_complete:
                 self.bell()
@@ -3101,6 +3196,13 @@ if TEXTUAL_AVAILABLE:
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             button_id = event.button.id or ""
+            if button_id.startswith("db-filter-"):
+                if self._is_files_tab_active():
+                    self.bell()
+                    return
+                level = button_id.replace("db-filter-", "", 1)
+                self._set_db_filter(level)
+                return
             if button_id == "action-rescan":
                 self.action_stop_restart()
                 return
@@ -3131,10 +3233,10 @@ if TEXTUAL_AVAILABLE:
                     self.bell()
                     return
                 row_index = table.cursor_coordinate.row
-                if row_index < 0 or row_index >= len(self.db_findings):
+                if row_index < 0 or row_index >= len(self.db_visible_findings):
                     self.bell()
                     return
-                self.push_screen(DatabaseFindingDetailScreen(self.db_findings[row_index]))
+                self.push_screen(DatabaseFindingDetailScreen(self.db_visible_findings[row_index]))
                 return
             if not self.scan_complete:
                 self.bell()
@@ -3162,9 +3264,9 @@ if TEXTUAL_AVAILABLE:
                 if table.row_count == 0:
                     return
                 row_index = table.cursor_coordinate.row
-                if row_index < 0 or row_index >= len(self.db_findings):
+                if row_index < 0 or row_index >= len(self.db_visible_findings):
                     return
-                self.push_screen(DatabaseFindingDetailScreen(self.db_findings[row_index]))
+                self.push_screen(DatabaseFindingDetailScreen(self.db_visible_findings[row_index]))
                 return
             if not self.scan_complete:
                 return
