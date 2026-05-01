@@ -213,6 +213,7 @@ class DatabaseFinding:
     matched_content: str
     description: str
     remediation: str
+    source_excerpt: str = ""
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
@@ -420,6 +421,7 @@ class DatabaseConnector:
                                 matched_content=m.group(0)[:200],
                                 description=desc,
                                 remediation=remediation,
+                                source_excerpt=text[:1200],
                             )
                         )
                         break
@@ -1030,6 +1032,7 @@ class ReportGenerator:
                 "threat_level": f.threat_level,
                 "category": f.category,
                 "matched_content": f.matched_content,
+                "source_excerpt": f.source_excerpt,
                 "description": f.description,
                 "remediation": f.remediation,
                 "timestamp": f.timestamp,
@@ -1992,6 +1995,26 @@ if TEXTUAL_AVAILABLE:
         def _render_code_panel(self):
             return Panel(self._render_syntax(), title=Path(self.finding.file_path).name)
 
+    class DatabaseFindingDetailScreen(ModalScreen):
+        def __init__(self, finding: DatabaseFinding):
+            super().__init__()
+            self.finding = finding
+
+        def compose(self) -> ComposeResult:
+            with Container(classes="popup-host"):
+                with Container(id="detail-container", classes="popup"):
+                    sev_style = SEVERITY_STYLES.get(self.finding.threat_level, "white")
+                    yield Label(f"[{sev_style}]● {self.finding.threat_level.upper()}[/]  {self.finding.signature_name}")
+                    yield Label(f"[b]Table:[/b] {self.finding.table_name}    [b]Row:[/b] {self.finding.row_ref}")
+                    yield Label(f"[b]Signature ID:[/b] {self.finding.signature_id}    [b]Category:[/b] {self.finding.category}")
+                    yield Label("[b]Matched Content[/b]")
+                    yield Label(self.finding.matched_content, classes="wrap")
+                    yield Label("[b]Source Excerpt[/b]")
+                    with VerticalScroll(classes="code-view"):
+                        yield Static(self.finding.source_excerpt or "(no excerpt available)")
+                    yield Label(f"[b]What it means:[/b] {self.finding.description}", classes="wrap")
+                    yield Label(f"[b]How to remove:[/b] {self.finding.remediation}", classes="wrap")
+
     class RestoreFromQuarantineScreen(ModalScreen):
         BINDINGS = [
             Binding("escape", "cancel", "Close"),
@@ -2342,6 +2365,9 @@ if TEXTUAL_AVAILABLE:
                 self.query_one("#db-status", Static).update("No database findings.")
             else:
                 self.query_one("#db-status", Static).update(f"Database findings: {len(self.db_findings)}")
+                table.cursor_type = "row"
+                if table.row_count > 0:
+                    table.cursor_coordinate = (0, 0)
 
         def _prepare_remote_snapshot(self) -> None:
             if not self.remote_config:
@@ -2709,13 +2735,15 @@ if TEXTUAL_AVAILABLE:
                 self._start_scan()
                 self._update_pause_state()
         def action_cursor_down(self) -> None:
-            if not self._is_files_tab_active():
-                return
-            self.query_one(DataTable).action_cursor_down()
+            if self._is_files_tab_active():
+                self.query_one(DataTable).action_cursor_down()
+            else:
+                self.query_one("#db-findings-table", DataTable).action_cursor_down()
         def action_cursor_up(self) -> None:
-            if not self._is_files_tab_active():
-                return
-            self.query_one(DataTable).action_cursor_up()
+            if self._is_files_tab_active():
+                self.query_one(DataTable).action_cursor_up()
+            else:
+                self.query_one("#db-findings-table", DataTable).action_cursor_up()
         def action_toggle_sort(self) -> None:
             if not self._is_files_tab_active():
                 self.bell()
@@ -2994,7 +3022,15 @@ if TEXTUAL_AVAILABLE:
 
         def action_show_detail(self) -> None:
             if not self._is_files_tab_active():
-                self.bell()
+                table = self.query_one("#db-findings-table", DataTable)
+                if table.row_count == 0:
+                    self.bell()
+                    return
+                row_index = table.cursor_coordinate.row
+                if row_index < 0 or row_index >= len(self.db_findings):
+                    self.bell()
+                    return
+                self.push_screen(DatabaseFindingDetailScreen(self.db_findings[row_index]))
                 return
             if not self.scan_complete:
                 self.bell()
@@ -3018,6 +3054,13 @@ if TEXTUAL_AVAILABLE:
 
         def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
             if not self._is_files_tab_active():
+                table = self.query_one("#db-findings-table", DataTable)
+                if table.row_count == 0:
+                    return
+                row_index = table.cursor_coordinate.row
+                if row_index < 0 or row_index >= len(self.db_findings):
+                    return
+                self.push_screen(DatabaseFindingDetailScreen(self.db_findings[row_index]))
                 return
             if not self.scan_complete:
                 return
@@ -3432,6 +3475,7 @@ class RemoteSSHCollector:
                                 matched_content=m.group(0)[:200],
                                 description=desc,
                                 remediation=remediation,
+                                source_excerpt=text[:1200],
                             )
                         )
                         break
