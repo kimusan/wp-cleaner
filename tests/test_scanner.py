@@ -346,6 +346,30 @@ class ScannerTests(unittest.TestCase):
         self.assertIn("window.location", finding.matched_content)
         self.assertIn("SELECT option_name, option_value FROM wp_options", finding.query_preview)
 
+    def test_database_scan_risks_deduplicates_same_row_signature(self):
+        cfg = DatabaseConfig(name="wpdb", user="wpuser")
+        connector = DatabaseConnector(cfg)
+        duplicate_rows = {
+            "wp_options": [("siteurl", "window.location='https://evil.example'", "window.location='https://evil2.example'")],
+            "wp_posts": [],
+            "wp_usermeta": [],
+        }
+
+        def _fake_fetch(query: str):
+            if " from wp_options " in query.lower():
+                return duplicate_rows["wp_options"]
+            if " from wp_posts " in query.lower():
+                return duplicate_rows["wp_posts"]
+            if " from wp_usermeta " in query.lower():
+                return duplicate_rows["wp_usermeta"]
+            return []
+
+        with patch.object(connector, "_fetch_rows", side_effect=_fake_fetch):
+            findings = connector.scan_risks(limit_per_table=100)
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].signature_id, "DB003")
+
     def test_remote_ssh_collector_builds_secure_base_command(self):
         cfg = RemoteSSHConfig(
             host_target="user@example.com",

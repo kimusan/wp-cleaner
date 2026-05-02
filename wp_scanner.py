@@ -396,6 +396,7 @@ class DatabaseConnector:
             (f"{prefix}usermeta", f"SELECT user_id, meta_key, meta_value FROM {prefix}usermeta LIMIT {int(limit_per_table)}"),
         ]
         findings: List[DatabaseFinding] = []
+        seen_findings: Set[Tuple[str, str, str]] = set()
         def _preview_query(table_name: str, row_ref: str, matched: str) -> str:
             safe_ref = row_ref.replace("'", "''")
             safe_match = matched.replace("'", "''")
@@ -428,6 +429,10 @@ class DatabaseConnector:
                         m = pattern.search(text)
                         if not m:
                             continue
+                        dedupe_key = (table_name, row_ref, sig_id)
+                        if dedupe_key in seen_findings:
+                            break
+                        seen_findings.add(dedupe_key)
                         findings.append(
                             DatabaseFinding(
                                 table_name=table_name,
@@ -3736,6 +3741,7 @@ class RemoteSSHCollector:
             (f"{prefix}usermeta", f"SELECT user_id, meta_key, meta_value FROM {prefix}usermeta LIMIT {int(limit_per_table)}"),
         ]
         findings: List[DatabaseFinding] = []
+        seen_findings: Set[Tuple[str, str, str]] = set()
         def _preview_query(table_name: str, row_ref: str, matched: str) -> str:
             safe_ref = row_ref.replace("'", "''")
             safe_match = matched.replace("'", "''")
@@ -3782,6 +3788,10 @@ class RemoteSSHCollector:
                         m = pattern.search(text)
                         if not m:
                             continue
+                        dedupe_key = (table_name, row_ref, sig_id)
+                        if dedupe_key in seen_findings:
+                            break
+                        seen_findings.add(dedupe_key)
                         findings.append(
                             DatabaseFinding(
                                 table_name=table_name,
