@@ -2252,7 +2252,7 @@ if TEXTUAL_AVAILABLE:
             ("enter", "show_detail", "Details"),
             ("p", "toggle_pause", "Pause"),
             ("s", "toggle_sort", "Sort"),
-            ("f", "toggle_db_filter", "DB Filter"),
+            ("f", "toggle_db_filter", "Filter"),
             ("up", "cursor_up", "Up"),
             ("down", "cursor_down", "Down"),
             ("j", "cursor_down", "Down"),
@@ -2523,10 +2523,21 @@ if TEXTUAL_AVAILABLE:
         def action_show_files_tab(self) -> None:
             tabs = self.query_one("#findings-tabs", TabbedContent)
             tabs.active = "tab-files"
+            if self.scan_complete:
+                filter_name = self._severity_filters[self._severity_filter_index]
+                sort_name = self._sort_columns[self._sort_index] if self._sorting_active else "append-order"
+                self.query_one("#sort-help", Static).update(
+                    f"Sort: {sort_name} | Filter: {filter_name} (s=sort, f=filter, d/enter=details, e=export)"
+                )
 
         def action_show_db_tab(self) -> None:
             tabs = self.query_one("#findings-tabs", TabbedContent)
             tabs.active = "tab-db"
+            filter_name = self._db_filter_levels[self._db_filter_index]
+            sort_name = self._db_sort_columns[self._db_sort_index]
+            self.query_one("#sort-help", Static).update(
+                f"DB Sort: {sort_name} | Filter: {filter_name} (s=sort, f=filter, d/enter=details, e=export)"
+            )
 
         def _db_sort_key(self, finding: DatabaseFinding) -> Tuple:
             key = self._db_sort_columns[self._db_sort_index]
@@ -2574,9 +2585,19 @@ if TEXTUAL_AVAILABLE:
             if self._is_files_tab_active():
                 self._severity_filter_index = (self._severity_filter_index + 1) % len(self._severity_filters)
                 self._refresh_table()
+                filter_name = self._severity_filters[self._severity_filter_index]
+                sort_name = self._sort_columns[self._sort_index] if self._sorting_active else "append-order"
+                self.query_one("#sort-help", Static).update(
+                    f"Sort: {sort_name} | Filter: {filter_name} (s=sort, f=filter, d/enter=details, e=export)"
+                )
             else:
                 self._db_filter_index = (self._db_filter_index + 1) % len(self._db_filter_levels)
                 self._refresh_db_table()
+                filter_name = self._db_filter_levels[self._db_filter_index]
+                sort_name = self._db_sort_columns[self._db_sort_index]
+                self.query_one("#sort-help", Static).update(
+                    f"DB Sort: {sort_name} | Filter: {filter_name} (s=sort, f=filter, d/enter=details, e=export)"
+                )
             self._refresh_filter_buttons()
 
         def _prepare_remote_snapshot(self) -> None:
@@ -2722,7 +2743,9 @@ if TEXTUAL_AVAILABLE:
             self._severity_filter_index = self._severity_filters.index(filter_name)
             self._refresh_filter_buttons()
             sort_name = self._sort_columns[self._sort_index] if self._sorting_active else "append-order"
-            self.query_one("#sort-help", Static).update(f"Sort: {sort_name} | Filter: {filter_name} (s=sort, d/enter=details, e=export)")
+            self.query_one("#sort-help", Static).update(
+                f"Sort: {sort_name} | Filter: {filter_name} (s=sort, f=filter, d/enter=details, e=export)"
+            )
             self._refresh_table()
 
         def _refresh_filter_buttons(self) -> None:
@@ -2907,7 +2930,9 @@ if TEXTUAL_AVAILABLE:
                     self._refresh_db_table()
                 self.scan_complete = True
                 self.sub_title = "✓ Scan Complete"
-                self.query_one("#sort-help", Static).update("Sort: severity | Filter: all (s=sort, d/enter=details, e=export)")
+                self.query_one("#sort-help", Static).update(
+                    "Sort: severity | Filter: all (s=sort, f=filter, d/enter=details, e=export)"
+                )
             self.scan_running = False
             self._update_pause_state()
             if self.executor:
@@ -2973,6 +2998,11 @@ if TEXTUAL_AVAILABLE:
                     return
                 self._db_sort_index = (self._db_sort_index + 1) % len(self._db_sort_columns)
                 self._refresh_db_table()
+                filter_name = self._db_filter_levels[self._db_filter_index]
+                sort_name = self._db_sort_columns[self._db_sort_index]
+                self.query_one("#sort-help", Static).update(
+                    f"DB Sort: {sort_name} | Filter: {filter_name} (s=sort, f=filter, d/enter=details, e=export)"
+                )
                 return
             if not self.scan_complete:
                 self.bell()
@@ -2984,7 +3014,9 @@ if TEXTUAL_AVAILABLE:
             self._sort_index = (self._sort_index + 1) % len(self._sort_columns)
             self.sort_label = self._sort_columns[self._sort_index]
             filter_name = self._severity_filters[self._severity_filter_index]
-            self.query_one("#sort-help", Static).update(f"Sort: {self.sort_label} | Filter: {filter_name} (s=sort, d/enter=details, e=export)")
+            self.query_one("#sort-help", Static).update(
+                f"Sort: {self.sort_label} | Filter: {filter_name} (s=sort, f=filter, d/enter=details, e=export)"
+            )
             self._refresh_table()
 
         def action_export_results(self) -> None:
