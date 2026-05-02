@@ -3010,6 +3010,7 @@ if TEXTUAL_AVAILABLE:
                 timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
                 json_path = Path(f"wp-scan-db-findings-{timestamp}.json")
                 csv_path = Path(f"wp-scan-db-findings-{timestamp}.csv")
+                sql_path = Path(f"wp-scan-db-query-preview-{timestamp}.sql")
                 rows = []
                 for finding in self.db_visible_findings:
                     rows.append(
@@ -3034,7 +3035,10 @@ if TEXTUAL_AVAILABLE:
                     writer = csv.DictWriter(cf, fieldnames=list(rows[0].keys()))
                     writer.writeheader()
                     writer.writerows(rows)
-                self.query_one("#db-status", Static).update(f"Exported DB findings: {json_path.name}, {csv_path.name}")
+                _write_db_query_preview_file(self.db_visible_findings, sql_path)
+                self.query_one("#db-status", Static).update(
+                    f"Exported DB findings: {json_path.name}, {csv_path.name}, {sql_path.name}"
+                )
                 return
             if not self.scan_complete:
                 self.bell()
