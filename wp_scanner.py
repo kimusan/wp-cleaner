@@ -2413,13 +2413,6 @@ if TEXTUAL_AVAILABLE:
                         yield DataTable(id="findings-table")
                         yield Static("Sort/Details/Export are enabled after scan completes", id="sort-help")
                     with TabPane("Database Findings", id="tab-db"):
-                        with Horizontal(id="db-filter-row"):
-                            yield Label("DB:")
-                            yield Button("All", id="db-filter-all")
-                            yield Button("Critical", id="db-filter-critical")
-                            yield Button("High", id="db-filter-high")
-                            yield Button("Medium", id="db-filter-medium")
-                            yield Button("Low", id="db-filter-low")
                         yield DataTable(id="db-findings-table")
                         yield Static("Database findings will appear here when DB scanning is enabled.", id="db-status")
             yield Footer()
@@ -2430,7 +2423,7 @@ if TEXTUAL_AVAILABLE:
             table.cursor_type = "row"
             db_table = self.query_one("#db-findings-table", DataTable)
             db_table.add_columns("Level", "Table", "Row", "Threat", "Category")
-            self._refresh_db_filter_buttons()
+            self._refresh_filter_buttons()
             table.focus()
             if self.remote_config and self.db_only:
                 self._prepare_remote_db_only()
@@ -2543,17 +2536,6 @@ if TEXTUAL_AVAILABLE:
                 return (finding.table_name.lower(), SEVERITY_RANK.get(finding.threat_level, 99), finding.row_ref)
             return (finding.category.lower(), SEVERITY_RANK.get(finding.threat_level, 99), finding.table_name)
 
-        def _refresh_db_filter_buttons(self) -> None:
-            selected = self._db_filter_levels[self._db_filter_index]
-            for level in self._db_filter_levels:
-                btn = self.query_one(f"#db-filter-{level}", Button)
-                if level == selected:
-                    btn.label = f"[b]{level.capitalize()}[/b]"
-                    btn.variant = "primary"
-                else:
-                    btn.label = level.capitalize()
-                    btn.variant = "default"
-
         def _refresh_db_table(self) -> None:
             table = self.query_one("#db-findings-table", DataTable)
             table.clear()
@@ -2580,7 +2562,7 @@ if TEXTUAL_AVAILABLE:
                 table.cursor_type = "row"
                 if table.row_count > 0:
                     table.cursor_coordinate = (0, 0)
-            self._refresh_db_filter_buttons()
+            self._refresh_filter_buttons()
 
         def _set_db_filter(self, level: str) -> None:
             if level not in self._db_filter_levels:
@@ -2590,9 +2572,12 @@ if TEXTUAL_AVAILABLE:
 
         def action_toggle_db_filter(self) -> None:
             if self._is_files_tab_active():
-                return
-            self._db_filter_index = (self._db_filter_index + 1) % len(self._db_filter_levels)
-            self._refresh_db_table()
+                self._severity_filter_index = (self._severity_filter_index + 1) % len(self._severity_filters)
+                self._refresh_table()
+            else:
+                self._db_filter_index = (self._db_filter_index + 1) % len(self._db_filter_levels)
+                self._refresh_db_table()
+            self._refresh_filter_buttons()
 
         def _prepare_remote_snapshot(self) -> None:
             if not self.remote_config:
@@ -2741,7 +2726,10 @@ if TEXTUAL_AVAILABLE:
             self._refresh_table()
 
         def _refresh_filter_buttons(self) -> None:
-            selected = self._severity_filters[self._severity_filter_index]
+            if self._is_files_tab_active():
+                selected = self._severity_filters[self._severity_filter_index]
+            else:
+                selected = self._db_filter_levels[self._db_filter_index]
             for filter_name in self._severity_filters:
                 btn = self.query_one(f"#filter-{filter_name}", Button)
                 if filter_name == selected:
@@ -3272,13 +3260,6 @@ if TEXTUAL_AVAILABLE:
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             button_id = event.button.id or ""
-            if button_id.startswith("db-filter-"):
-                if self._is_files_tab_active():
-                    self.bell()
-                    return
-                level = button_id.replace("db-filter-", "", 1)
-                self._set_db_filter(level)
-                return
             if button_id == "action-rescan":
                 self.action_stop_restart()
                 return
@@ -3300,7 +3281,13 @@ if TEXTUAL_AVAILABLE:
                 self.bell()
                 return
             filter_name = button_id.replace("filter-", "", 1)
-            self._set_filter(filter_name)
+            if self._is_files_tab_active():
+                self._set_filter(filter_name)
+            else:
+                self._set_db_filter(filter_name)
+
+        def on_tabbed_content_tab_activated(self, _event: TabbedContent.TabActivated) -> None:
+            self._refresh_filter_buttons()
 
         def action_show_detail(self) -> None:
             if not self._is_files_tab_active():
