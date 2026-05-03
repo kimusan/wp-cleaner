@@ -26,6 +26,9 @@ from wp_scanner import (
     ReportGenerator,
     ScanStats,
     _write_db_query_preview_file,
+    _db_finding_fingerprint,
+    _load_db_reviewed_state,
+    _save_db_reviewed_state,
     main,
 )
 
@@ -298,6 +301,30 @@ class ScannerTests(unittest.TestCase):
             self.assertIn("wp-scanner DB remediation query preview", content)
             self.assertIn("DB003", content)
             self.assertIn("SELECT option_name FROM wp_options", content)
+
+    def test_db_reviewed_state_save_and_load_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "reviewed.json"
+            values = {"abc123", "def456"}
+            _save_db_reviewed_state(state_file, values)
+            loaded = _load_db_reviewed_state(state_file)
+            self.assertEqual(loaded, values)
+
+    def test_db_finding_fingerprint_stable_for_same_finding(self):
+        finding = DatabaseFinding(
+            table_name="wp_options",
+            row_ref="siteurl",
+            signature_id="DB003",
+            signature_name="Script Redirect",
+            threat_level="high",
+            category="redirect",
+            matched_content="window.location=",
+            description="Suspicious redirect payload in DB content",
+            remediation="Remove redirect payload",
+        )
+        f1 = _db_finding_fingerprint(finding)
+        f2 = _db_finding_fingerprint(finding)
+        self.assertEqual(f1, f2)
 
     def test_database_scan_risks_clean_fixture_has_no_findings(self):
         cfg = DatabaseConfig(name="wpdb", user="wpuser")

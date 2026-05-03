@@ -1292,6 +1292,36 @@ def _write_db_query_preview_file(db_findings: List[DatabaseFinding], output_path
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _db_finding_fingerprint(finding: DatabaseFinding) -> str:
+    raw = (
+        f"{finding.table_name}|{finding.row_ref}|{finding.signature_id}|"
+        f"{finding.category}|{finding.matched_content[:120]}"
+    )
+    return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _load_db_reviewed_state(path: Path) -> Set[str]:
+    if not path.exists():
+        return set()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return set()
+    rows = payload.get("reviewed_db_fingerprints", [])
+    if not isinstance(rows, list):
+        return set()
+    return {str(item).strip() for item in rows if str(item).strip()}
+
+
+def _save_db_reviewed_state(path: Path, fingerprints: Set[str]) -> None:
+    payload = {
+        "saved_at": datetime.now().isoformat(),
+        "reviewed_db_fingerprints": sorted(fingerprints),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
 def _collect_infected_paths(results: List[ScanResult]) -> List[Path]:
     infected = sorted({Path(r.file_path) for r in results if r.findings})
     return infected
@@ -2345,6 +2375,7 @@ if TEXTUAL_AVAILABLE:
             scan_path: str,
             threads: int,
             audit_log_path: str = "wp-scan-remediation-audit.jsonl",
+            db_reviewed_state_path: str = "wp-scan-db-reviewed.json",
             core_verifier: Optional[WordPressCoreVerifier] = None,
             extension_verifier: Optional[WordPressExtensionVerifier] = None,
             remote_config: Optional["RemoteSSHConfig"] = None,
@@ -2358,6 +2389,7 @@ if TEXTUAL_AVAILABLE:
             self.scan_path = scan_path
             self.threads = threads
             self.audit_log_path = Path(audit_log_path)
+            self.db_reviewed_state_path = Path(db_reviewed_state_path)
             self.core_verifier = core_verifier
             self.extension_verifier = extension_verifier
             self.remote_config = remote_config
@@ -2377,7 +2409,7 @@ if TEXTUAL_AVAILABLE:
             self.db_rows: List[Tuple[str, DatabaseFinding]] = []
             self.db_visible_rows: List[Tuple[str, DatabaseFinding]] = []
             self.selected_db_keys: Set[str] = set()
-            self.reviewed_db_keys: Set[str] = set()
+            self.reviewed_db_fingerprints: Set[str] = _load_db_reviewed_state(self.db_reviewed_state_path)
             self.scan_complete = False
             self.scan_running = False
             self.executor: Optional[ThreadPoolExecutor] = None
@@ -2584,7 +2616,7 @@ if TEXTUAL_AVAILABLE:
                 sev = f"[{SEVERITY_STYLES.get(finding.threat_level,'white')}]{finding.threat_level.upper()}[/]"
                 mark = "[green]☑[/]" if key in self.selected_db_keys else "☐"
                 threat_name = finding.signature_name
-                if key in self.reviewed_db_keys:
+                if _db_finding_fingerprint(finding) in self.reviewed_db_fingerprints:
                     threat_name = f"{threat_name} [dim](reviewed)[/]"
                 table.add_row(mark, sev, finding.table_name, finding.row_ref, threat_name, finding.category, key=key)
             if not self.db_findings:
@@ -2691,7 +2723,6 @@ if TEXTUAL_AVAILABLE:
             self.visible_rows.clear()
             self.selected_keys.clear()
             self.selected_db_keys.clear()
-            self.reviewed_db_keys.clear()
             self.total_files = 0
             self.files_scanned = 0
             self.critical_count = 0
@@ -2850,7 +2881,6 @@ if TEXTUAL_AVAILABLE:
                         self.db_findings = []
                 self.db_rows = [(f"db_{idx}", finding) for idx, finding in enumerate(self.db_findings)]
                 self.selected_db_keys.clear()
-                self.reviewed_db_keys.clear()
                 self._refresh_db_table()
                 self.scan_complete = True
                 self.scan_running = False
@@ -2993,7 +3023,6 @@ if TEXTUAL_AVAILABLE:
                     self.db_findings = db_findings
                     self.db_rows = [(f"db_{idx}", finding) for idx, finding in enumerate(self.db_findings)]
                     self.selected_db_keys.clear()
-                    self.reviewed_db_keys.clear()
                     self._refresh_db_table()
                 self.scan_complete = True
                 self.sub_title = "✓ Scan Complete"
@@ -3119,7 +3148,7 @@ if TEXTUAL_AVAILABLE:
                             "query_preview": finding.query_preview,
                             "description": finding.description,
                             "remediation": finding.remediation,
-                            "reviewed": key in self.reviewed_db_keys,
+                            "reviewed": _db_finding_fingerprint(finding) in self.reviewed_db_fingerprints,
                             "timestamp": finding.timestamp,
                         }
                     )
@@ -3286,11 +3315,18 @@ if TEXTUAL_AVAILABLE:
                     self.bell()
                     return
                 selected_keys = {self.db_visible_rows[row_index][0]}
-            if selected_keys.issubset(self.reviewed_db_keys):
-                self.reviewed_db_keys -= selected_keys
+            target_fingerprints = {
+                _db_finding_fingerprint(f)
+                for k, f in self.db_visible_rows
+                if k in selected_keys
+            }
+            if target_fingerprints.issubset(self.reviewed_db_fingerprints):
+                self.reviewed_db_fingerprints -= target_fingerprints
+                _save_db_reviewed_state(self.db_reviewed_state_path, self.reviewed_db_fingerprints)
                 self.query_one("#db-status", Static).update(f"Cleared reviewed state for {len(selected_keys)} DB finding(s)")
             else:
-                self.reviewed_db_keys |= selected_keys
+                self.reviewed_db_fingerprints |= target_fingerprints
+                _save_db_reviewed_state(self.db_reviewed_state_path, self.reviewed_db_fingerprints)
                 self.query_one("#db-status", Static).update(f"Marked {len(selected_keys)} DB finding(s) as reviewed")
             self._refresh_db_table()
 
@@ -3994,6 +4030,7 @@ def main():
     db_group.add_argument('--db-table-prefix', default='', help='Override WordPress database table prefix')
     db_group.add_argument('--db-limit-per-table', type=int, default=2000, help='Max rows to scan per database table')
     db_group.add_argument('--db-query-preview-file', default='', help='Write non-destructive DB query previews to this .sql file')
+    db_group.add_argument('--db-reviewed-state', default='wp-scan-db-reviewed.json', help='Path to JSON file storing reviewed DB finding fingerprints (TUI)')
     args = parser.parse_args()
     if args.db_limit_per_table <= 0:
         parser.error("--db-limit-per-table must be greater than 0")
@@ -4396,6 +4433,7 @@ def main():
             scan_path=scan_path,
             threads=args.threads,
             audit_log_path=args.audit_log,
+            db_reviewed_state_path=args.db_reviewed_state,
             core_verifier=verifier,
             extension_verifier=extension_verifier,
             remote_config=remote_config,
