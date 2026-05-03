@@ -310,6 +310,19 @@ class ScannerTests(unittest.TestCase):
             loaded = _load_db_reviewed_state(state_file)
             self.assertEqual(loaded, values)
 
+    def test_db_reviewed_state_load_missing_file_returns_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "missing.json"
+            loaded = _load_db_reviewed_state(state_file)
+            self.assertEqual(loaded, set())
+
+    def test_db_reviewed_state_load_invalid_json_returns_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "bad.json"
+            state_file.write_text("{invalid", encoding="utf-8")
+            loaded = _load_db_reviewed_state(state_file)
+            self.assertEqual(loaded, set())
+
     def test_db_finding_fingerprint_stable_for_same_finding(self):
         finding = DatabaseFinding(
             table_name="wp_options",
