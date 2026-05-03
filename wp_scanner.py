@@ -2351,6 +2351,7 @@ if TEXTUAL_AVAILABLE:
             db_config: Optional[DatabaseConfig] = None,
             db_only: bool = False,
             db_overrides: Optional[Dict[str, object]] = None,
+            db_limit_per_table: int = 2000,
         ):
             super().__init__()
             self.scanner = scanner
@@ -2363,6 +2364,7 @@ if TEXTUAL_AVAILABLE:
             self.db_config = db_config
             self.db_only = db_only
             self.db_overrides = db_overrides or {}
+            self.db_limit_per_table = max(1, int(db_limit_per_table))
             self.remote_collector: Optional["RemoteSSHCollector"] = None
             self.signature_target_types: Dict[str, str] = {
                 sig.id: (sig.target_type or "all") for sig in self.scanner.signatures
@@ -2836,9 +2838,14 @@ if TEXTUAL_AVAILABLE:
                                 None,
                                 self.remote_collector.scan_remote_database_risks,
                                 self.db_config,
+                                self.db_limit_per_table,
                             )
                         else:
-                            self.db_findings = await loop.run_in_executor(None, DatabaseConnector(self.db_config).scan_risks)
+                            self.db_findings = await loop.run_in_executor(
+                                None,
+                                DatabaseConnector(self.db_config).scan_risks,
+                                self.db_limit_per_table,
+                            )
                     except Exception:
                         self.db_findings = []
                 self.db_rows = [(f"db_{idx}", finding) for idx, finding in enumerate(self.db_findings)]
@@ -2979,6 +2986,7 @@ if TEXTUAL_AVAILABLE:
                         db_findings = await loop.run_in_executor(
                             self.executor,
                             DatabaseConnector(self.db_config).scan_risks,
+                            self.db_limit_per_table,
                         )
                     except Exception:
                         db_findings = []
@@ -3984,8 +3992,11 @@ def main():
     db_group.add_argument('--db-password-env', default='', help='Read database password from environment variable')
     db_group.add_argument('--db-socket', default='', help='Use UNIX socket for database connection')
     db_group.add_argument('--db-table-prefix', default='', help='Override WordPress database table prefix')
+    db_group.add_argument('--db-limit-per-table', type=int, default=2000, help='Max rows to scan per database table')
     db_group.add_argument('--db-query-preview-file', default='', help='Write non-destructive DB query previews to this .sql file')
     args = parser.parse_args()
+    if args.db_limit_per_table <= 0:
+        parser.error("--db-limit-per-table must be greater than 0")
     selected_actions = sum(bool(x) for x in (args.quarantine, args.delete, args.restore))
     if selected_actions > 1:
         parser.error("--quarantine, --delete and --restore are mutually exclusive")
@@ -4265,9 +4276,12 @@ def main():
                     if remote_collector is None:
                         remote_collector = RemoteSSHCollector(remote_config)
                     remote_db_collector = remote_collector
-                    db_findings = remote_db_collector.scan_remote_database_risks(db_config)
+                    db_findings = remote_db_collector.scan_remote_database_risks(
+                        db_config,
+                        args.db_limit_per_table,
+                    )
                 else:
-                    db_findings = DatabaseConnector(db_config).scan_risks()
+                    db_findings = DatabaseConnector(db_config).scan_risks(args.db_limit_per_table)
                 print(f"Database findings: {len(db_findings)}")
                 if args.db_query_preview_file:
                     out_path = _resolve_report_output_path(
@@ -4387,6 +4401,7 @@ def main():
             remote_config=remote_config,
             db_config=db_config if args.scan_db else None,
             db_only=args.db_only,
+            db_limit_per_table=args.db_limit_per_table,
             db_overrides={
                 "host": args.db_host,
                 "port": args.db_port,

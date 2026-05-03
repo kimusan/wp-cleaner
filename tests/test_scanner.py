@@ -405,7 +405,7 @@ class ScannerTests(unittest.TestCase):
 
         collector.fetch_snapshot.assert_not_called()
         collector.fetch_remote_wp_config_content.assert_called()
-        collector.scan_remote_database_risks.assert_called()
+        collector.scan_remote_database_risks.assert_called_with(unittest.mock.ANY, 2000)
 
     @patch("wp_scanner.getpass.getpass", return_value="secret")
     @patch("wp_scanner.RemoteSSHCollector")
