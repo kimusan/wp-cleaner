@@ -26,6 +26,7 @@ from wp_scanner import (
     ReportGenerator,
     ScanStats,
     _write_db_query_preview_file,
+    main,
 )
 
 
@@ -369,6 +370,42 @@ class ScannerTests(unittest.TestCase):
 
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].signature_id, "DB003")
+
+    @patch("wp_scanner.getpass.getpass", return_value="secret")
+    @patch("wp_scanner.RemoteSSHCollector")
+    @patch("wp_scanner.TEXTUAL_AVAILABLE", False)
+    def test_main_remote_db_only_skips_snapshot_and_scans_database(
+        self,
+        mock_collector_cls,
+        _mock_getpass,
+    ):
+        collector = mock_collector_cls.return_value
+        collector.fetch_remote_wp_config_content.return_value = (
+            "<?php\n"
+            "define('DB_NAME', 'wpdb');\n"
+            "define('DB_USER', 'wpuser');\n"
+            "define('DB_PASSWORD', 'secret');\n"
+            "define('DB_HOST', '127.0.0.1:3306');\n"
+            "$table_prefix = 'wp_';\n"
+        )
+        collector.test_remote_database_connection.return_value = (True, "ok")
+        collector.scan_remote_database_risks.return_value = []
+
+        argv = [
+            "wp-scanner.py",
+            ".",
+            "--no-tui",
+            "--scan-db",
+            "--db-only",
+            "--remote-ssh",
+            "root@example.com:/var/www/html",
+        ]
+        with patch("sys.argv", argv):
+            main()
+
+        collector.fetch_snapshot.assert_not_called()
+        collector.fetch_remote_wp_config_content.assert_called()
+        collector.scan_remote_database_risks.assert_called()
 
     def test_remote_ssh_collector_builds_secure_base_command(self):
         cfg = RemoteSSHConfig(
