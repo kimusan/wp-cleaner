@@ -2266,6 +2266,7 @@ if TEXTUAL_AVAILABLE:
             ("e", "export_results", "Export"),
             ("space", "toggle_selected", "Select"),
             ("a", "toggle_select_all_visible", "Select All"),
+            ("v", "toggle_reviewed", "Reviewed"),
             ("x", "quarantine_selected", "Quarantine"),
             ("delete", "delete_selected", "Delete"),
             ("u", "restore_selected", "Restore"),
@@ -2367,7 +2368,10 @@ if TEXTUAL_AVAILABLE:
             self.visible_rows: List[Tuple[str, Finding]] = []
             self.selected_keys: Set[str] = set()
             self.db_findings: List[DatabaseFinding] = []
-            self.db_visible_findings: List[DatabaseFinding] = []
+            self.db_rows: List[Tuple[str, DatabaseFinding]] = []
+            self.db_visible_rows: List[Tuple[str, DatabaseFinding]] = []
+            self.selected_db_keys: Set[str] = set()
+            self.reviewed_db_keys: Set[str] = set()
             self.scan_complete = False
             self.scan_running = False
             self.executor: Optional[ThreadPoolExecutor] = None
@@ -2427,7 +2431,7 @@ if TEXTUAL_AVAILABLE:
             table.add_columns("Sel", "Level", "File", "Location", "Threat", "Line")
             table.cursor_type = "row"
             db_table = self.query_one("#db-findings-table", DataTable)
-            db_table.add_columns("Level", "Table", "Row", "Threat", "Category")
+            db_table.add_columns("Sel", "Level", "Table", "Row", "Threat", "Category")
             self._refresh_filter_buttons()
             table.focus()
             if self.remote_config and self.db_only:
@@ -2554,16 +2558,24 @@ if TEXTUAL_AVAILABLE:
 
         def _refresh_db_table(self) -> None:
             table = self.query_one("#db-findings-table", DataTable)
+            keep_row = table.cursor_coordinate.row if table.row_count > 0 else 0
+            keep_key: Optional[str] = None
+            if 0 <= keep_row < len(self.db_visible_rows):
+                keep_key = self.db_visible_rows[keep_row][0]
             table.clear()
             level_filter = self._db_filter_levels[self._db_filter_index]
-            rows = list(self.db_findings)
+            rows = list(self.db_rows)
             if level_filter != "all":
-                rows = [f for f in rows if f.threat_level == level_filter]
-            rows.sort(key=self._db_sort_key)
-            self.db_visible_findings = rows
-            for finding in rows:
+                rows = [(k, f) for k, f in rows if f.threat_level == level_filter]
+            rows.sort(key=lambda item: self._db_sort_key(item[1]))
+            self.db_visible_rows = rows
+            for key, finding in rows:
                 sev = f"[{SEVERITY_STYLES.get(finding.threat_level,'white')}]{finding.threat_level.upper()}[/]"
-                table.add_row(sev, finding.table_name, finding.row_ref, finding.signature_name, finding.category)
+                mark = "[green]☑[/]" if key in self.selected_db_keys else "☐"
+                threat_name = finding.signature_name
+                if key in self.reviewed_db_keys:
+                    threat_name = f"{threat_name} [dim](reviewed)[/]"
+                table.add_row(mark, sev, finding.table_name, finding.row_ref, threat_name, finding.category, key=key)
             if not self.db_findings:
                 self.query_one("#db-status", Static).update("No database findings.")
             else:
@@ -2577,7 +2589,14 @@ if TEXTUAL_AVAILABLE:
                 )
                 table.cursor_type = "row"
                 if table.row_count > 0:
-                    table.cursor_coordinate = (0, 0)
+                    if keep_key is not None:
+                        new_index = next((idx for idx, (row_key, _f) in enumerate(self.db_visible_rows) if row_key == keep_key), None)
+                        if new_index is not None:
+                            table.cursor_coordinate = (new_index, 0)
+                        else:
+                            table.cursor_coordinate = (min(keep_row, table.row_count - 1), 0)
+                    else:
+                        table.cursor_coordinate = (min(keep_row, table.row_count - 1), 0)
             self._refresh_filter_buttons()
 
         def _set_db_filter(self, level: str) -> None:
@@ -2656,6 +2675,8 @@ if TEXTUAL_AVAILABLE:
             self.finding_rows.clear()
             self.visible_rows.clear()
             self.selected_keys.clear()
+            self.selected_db_keys.clear()
+            self.reviewed_db_keys.clear()
             self.total_files = 0
             self.files_scanned = 0
             self.critical_count = 0
@@ -2669,6 +2690,7 @@ if TEXTUAL_AVAILABLE:
             self._sort_index = -1
             self._severity_filter_index = 0
             self.query_one(DataTable).clear()
+            self.query_one("#db-findings-table", DataTable).clear()
             self.query_one(ProgressBar).update(progress=0)
             self.query_one("#sort-help", Static).update("Sort/Details/Export are enabled after scan completes")
             self._update_pause_state()
@@ -2802,6 +2824,9 @@ if TEXTUAL_AVAILABLE:
                             self.db_findings = await loop.run_in_executor(None, DatabaseConnector(self.db_config).scan_risks)
                     except Exception:
                         self.db_findings = []
+                self.db_rows = [(f"db_{idx}", finding) for idx, finding in enumerate(self.db_findings)]
+                self.selected_db_keys.clear()
+                self.reviewed_db_keys.clear()
                 self._refresh_db_table()
                 self.scan_complete = True
                 self.scan_running = False
@@ -2932,6 +2957,9 @@ if TEXTUAL_AVAILABLE:
                     except Exception:
                         db_findings = []
                     self.db_findings = db_findings
+                    self.db_rows = [(f"db_{idx}", finding) for idx, finding in enumerate(self.db_findings)]
+                    self.selected_db_keys.clear()
+                    self.reviewed_db_keys.clear()
                     self._refresh_db_table()
                 self.scan_complete = True
                 self.sub_title = "✓ Scan Complete"
@@ -3036,8 +3064,10 @@ if TEXTUAL_AVAILABLE:
                 json_path = Path(f"wp-scan-db-findings-{timestamp}.json")
                 csv_path = Path(f"wp-scan-db-findings-{timestamp}.csv")
                 sql_path = Path(f"wp-scan-db-query-preview-{timestamp}.sql")
+                selected_rows = [(k, f) for k, f in self.db_visible_rows if k in self.selected_db_keys]
+                export_findings = [f for _, f in selected_rows] if selected_rows else [f for _, f in self.db_visible_rows]
                 rows = []
-                for finding in self.db_visible_findings:
+                for finding in export_findings:
                     rows.append(
                         {
                             "table_name": finding.table_name,
@@ -3060,9 +3090,9 @@ if TEXTUAL_AVAILABLE:
                     writer = csv.DictWriter(cf, fieldnames=list(rows[0].keys()))
                     writer.writeheader()
                     writer.writerows(rows)
-                _write_db_query_preview_file(self.db_visible_findings, sql_path)
+                _write_db_query_preview_file(export_findings, sql_path)
                 self.query_one("#db-status", Static).update(
-                    f"Exported DB findings: {json_path.name}, {csv_path.name}, {sql_path.name}"
+                    f"Exported DB findings ({len(export_findings)}): {json_path.name}, {csv_path.name}, {sql_path.name}"
                 )
                 return
             if not self.scan_complete:
@@ -3135,7 +3165,23 @@ if TEXTUAL_AVAILABLE:
 
         def action_toggle_selected(self) -> None:
             if not self._is_files_tab_active():
-                self.bell()
+                if not self.scan_complete:
+                    self.bell()
+                    return
+                table = self.query_one("#db-findings-table", DataTable)
+                if table.row_count == 0:
+                    self.bell()
+                    return
+                row_index = table.cursor_coordinate.row
+                if row_index < 0 or row_index >= len(self.db_visible_rows):
+                    self.bell()
+                    return
+                key, _finding = self.db_visible_rows[row_index]
+                if key in self.selected_db_keys:
+                    self.selected_db_keys.remove(key)
+                else:
+                    self.selected_db_keys.add(key)
+                self._refresh_db_table()
                 return
             if not self.scan_complete:
                 self.bell()
@@ -3157,7 +3203,18 @@ if TEXTUAL_AVAILABLE:
 
         def action_toggle_select_all_visible(self) -> None:
             if not self._is_files_tab_active():
-                self.bell()
+                if not self.scan_complete:
+                    self.bell()
+                    return
+                keys = {k for k, _ in self.db_visible_rows}
+                if not keys:
+                    self.bell()
+                    return
+                if keys.issubset(self.selected_db_keys):
+                    self.selected_db_keys -= keys
+                else:
+                    self.selected_db_keys |= keys
+                self._refresh_db_table()
                 return
             if not self.scan_complete:
                 self.bell()
@@ -3171,6 +3228,32 @@ if TEXTUAL_AVAILABLE:
             else:
                 self.selected_keys |= keys
             self._refresh_table()
+
+        def action_toggle_reviewed(self) -> None:
+            if self._is_files_tab_active():
+                self.bell()
+                return
+            if not self.scan_complete:
+                self.bell()
+                return
+            selected_keys = set(self.selected_db_keys)
+            if not selected_keys:
+                table = self.query_one("#db-findings-table", DataTable)
+                if table.row_count == 0:
+                    self.bell()
+                    return
+                row_index = table.cursor_coordinate.row
+                if row_index < 0 or row_index >= len(self.db_visible_rows):
+                    self.bell()
+                    return
+                selected_keys = {self.db_visible_rows[row_index][0]}
+            if selected_keys.issubset(self.reviewed_db_keys):
+                self.reviewed_db_keys -= selected_keys
+                self.query_one("#db-status", Static).update(f"Cleared reviewed state for {len(selected_keys)} DB finding(s)")
+            else:
+                self.reviewed_db_keys |= selected_keys
+                self.query_one("#db-status", Static).update(f"Marked {len(selected_keys)} DB finding(s) as reviewed")
+            self._refresh_db_table()
 
         def _confirm_and_run(self, action: str, findings: List[Finding]) -> None:
             targets = sorted({f.file_path for f in findings})
@@ -3333,10 +3416,11 @@ if TEXTUAL_AVAILABLE:
                     self.bell()
                     return
                 row_index = table.cursor_coordinate.row
-                if row_index < 0 or row_index >= len(self.db_visible_findings):
+                if row_index < 0 or row_index >= len(self.db_visible_rows):
                     self.bell()
                     return
-                self.push_screen(DatabaseFindingDetailScreen(self.db_visible_findings[row_index]))
+                _, finding = self.db_visible_rows[row_index]
+                self.push_screen(DatabaseFindingDetailScreen(finding))
                 return
             if not self.scan_complete:
                 self.bell()
@@ -3364,9 +3448,10 @@ if TEXTUAL_AVAILABLE:
                 if table.row_count == 0:
                     return
                 row_index = table.cursor_coordinate.row
-                if row_index < 0 or row_index >= len(self.db_visible_findings):
+                if row_index < 0 or row_index >= len(self.db_visible_rows):
                     return
-                self.push_screen(DatabaseFindingDetailScreen(self.db_visible_findings[row_index]))
+                _, finding = self.db_visible_rows[row_index]
+                self.push_screen(DatabaseFindingDetailScreen(finding))
                 return
             if not self.scan_complete:
                 return
