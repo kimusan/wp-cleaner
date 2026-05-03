@@ -2291,6 +2291,7 @@ if TEXTUAL_AVAILABLE:
         #action-row { height: 3; margin: 0; }
         #action-row Button { min-width: 0; width: auto; margin-right: 1; padding: 0 1; }
         #scan-state { color: #7f8c8d; margin: 0; }
+        #scan-phase { color: #9aa5b1; margin: 0; }
         #sort-help { color: #7f8c8d; margin: 0 0 1 0; }
         #findings-table { height: 1fr; min-height: 8; }
         .popup-host {
@@ -2416,6 +2417,7 @@ if TEXTUAL_AVAILABLE:
                     with Container(id="logo-panel"):
                         yield Static(Text(self.LOGO, no_wrap=True, overflow="crop"), id="logo")
                 yield Static("Status: RUNNING", id="scan-state")
+                yield Static("Phase: initializing", id="scan-phase")
                 yield ProgressBar(total=100, id="progress-bar")
                 with TabbedContent(initial="tab-files", id="findings-tabs"):
                     with TabPane("File Findings", id="tab-files"):
@@ -2489,6 +2491,7 @@ if TEXTUAL_AVAILABLE:
         def _run_remote_db_setup_worker(self) -> None:
             self.query_one("#db-status", Static).update("Preparing remote database scan...")
             self._set_status_message("Preparing remote DB...", "cyan")
+            self._set_phase_message("Preparing remote DB credentials and preflight")
             self.run_worker(self._remote_db_setup_worker)
 
         async def _remote_db_setup_worker(self) -> None:
@@ -2501,6 +2504,7 @@ if TEXTUAL_AVAILABLE:
             loop = asyncio.get_running_loop()
             try:
                 content = await loop.run_in_executor(None, collector.fetch_remote_wp_config_content)
+                self._set_phase_message("Fetched remote wp-config.php; resolving DB credentials")
                 parsed = parse_wp_config_database_config_from_content(content) or DatabaseConfig()
                 resolved = self._apply_db_overrides(parsed)
                 if resolved is None:
@@ -2519,9 +2523,11 @@ if TEXTUAL_AVAILABLE:
                     f"DB preflight OK ({resolved.name}, {resolved.table_prefix})"
                 )
                 self._set_status_message("Remote DB preflight OK", "green")
+                self._set_phase_message("Remote DB preflight passed; starting scan")
                 self._start_scan()
             except Exception as exc:
                 self._set_status_message(f"Remote DB setup failed: {exc}", "red")
+                self._set_phase_message(f"Remote DB setup failed: {exc}")
                 self.query_one("#db-status", Static).update(f"Remote DB setup failed: {exc}")
                 self.bell()
 
@@ -2642,6 +2648,7 @@ if TEXTUAL_AVAILABLE:
         def _run_remote_fetch_worker(self) -> None:
             self.query_one("#sort-help", Static).update("Preparing remote SSH snapshot...")
             self._set_status_message("Connecting to remote host...", "cyan")
+            self._set_phase_message("Connecting to remote host")
             self.run_worker(self._fetch_remote_snapshot_worker)
 
         async def _fetch_remote_snapshot_worker(self) -> None:
@@ -2654,6 +2661,7 @@ if TEXTUAL_AVAILABLE:
 
             def _progress(message: str) -> None:
                 self.call_from_thread(self._set_status_message, message, "cyan")
+                self.call_from_thread(self._set_phase_message, message)
                 self.call_from_thread(setattr, self, "sub_title", message)
 
             try:
@@ -2662,11 +2670,13 @@ if TEXTUAL_AVAILABLE:
                 collector.cleanup()
                 self.remote_collector = None
                 self._set_status_message(f"Remote fetch failed: {exc}", "red")
+                self._set_phase_message(f"Remote fetch failed: {exc}")
                 self.query_one("#sort-help", Static).update("Remote fetch failed")
                 self.bell()
                 return
             self.scan_path = str(snapshot_path)
             self._set_status_message("Remote snapshot ready", "green")
+            self._set_phase_message("Remote snapshot ready; starting scan")
             self.query_one("#sort-help", Static).update(_format_remote_transfer_summary(collector))
             self._start_scan()
 
@@ -2693,6 +2703,7 @@ if TEXTUAL_AVAILABLE:
             self.query_one("#db-findings-table", DataTable).clear()
             self.query_one(ProgressBar).update(progress=0)
             self.query_one("#sort-help", Static).update("Sort/Details/Export are enabled after scan completes")
+            self._set_phase_message("Reset scan state")
             self._update_pause_state()
             self._refresh_filter_buttons()
 
@@ -2702,6 +2713,7 @@ if TEXTUAL_AVAILABLE:
             self.scan_running = True
             self.executor = ThreadPoolExecutor(max_workers=self.threads)
             self.sub_title = "Starting scan..."
+            self._set_phase_message("Starting scan")
             self._update_pause_state()
             self.scan_worker = self.run_worker(self._run_scan)
 
@@ -2709,6 +2721,7 @@ if TEXTUAL_AVAILABLE:
             self._stopping = True
             self.scan_running = False
             self._paused = False
+            self._set_phase_message("Scan stopped")
             self._update_pause_state()
             if self.executor:
                 self.executor.shutdown(wait=False, cancel_futures=True)
@@ -2810,6 +2823,7 @@ if TEXTUAL_AVAILABLE:
             if self.db_only:
                 self.sub_title = "Scanning database..."
                 self._set_status_message("RUNNING DB", "yellow")
+                self._set_phase_message("Scanning database")
                 if self.db_config:
                     try:
                         if self.remote_config:
@@ -2830,10 +2844,12 @@ if TEXTUAL_AVAILABLE:
                 self._refresh_db_table()
                 self.scan_complete = True
                 self.scan_running = False
+                self._set_phase_message("Database scan complete")
                 self._update_pause_state()
                 self.query_one("#sort-help", Static).update("File scanning disabled (--db-only)")
                 return
             self.sub_title = "Collecting files..."
+            self._set_phase_message("Collecting files")
             if not self.executor:
                 return
             files = await loop.run_in_executor(self.executor, self.scanner.collect_files, Path(self.scan_path))
@@ -2861,9 +2877,11 @@ if TEXTUAL_AVAILABLE:
                     core_hashes = dict(self.core_verifier.core_hashes)
                     self.sub_title = f"Core baseline active ({self.core_verifier.version}), skipped {skipped} unchanged core files"
                     self._set_status_message("RUNNING", "green")
+                    self._set_phase_message(f"Core baseline verification complete; skipped {skipped} files")
                 else:
                     self.sub_title = f"Core baseline skipped: {msg}"
                     self._set_status_message("RUNNING", "green")
+                    self._set_phase_message(f"Core baseline skipped: {msg}")
             if self.extension_verifier:
                 def _ext_progress(message: str) -> None:
                     self.call_from_thread(setattr, self, "sub_title", message)
@@ -2887,10 +2905,12 @@ if TEXTUAL_AVAILABLE:
                     self.scanner.unverified_extension_prefixes = set(self.extension_verifier.unverifiable_prefixes)
                     self.sub_title = f"Extension baseline active, skipped {skipped_ext} unchanged extension files"
                     self._set_status_message("RUNNING", "green")
+                    self._set_phase_message(f"Extension baseline verification complete; skipped {skipped_ext} files")
                 else:
                     self.scanner.unverified_extension_prefixes = set()
                     self.sub_title = f"Extension baseline skipped: {msg}"
                     self._set_status_message("RUNNING", "green")
+                    self._set_phase_message(f"Extension baseline skipped: {msg}")
             self.total_files = len(files)
             if not files:
                 self.sub_title = "✓ No files to scan."
@@ -2900,6 +2920,7 @@ if TEXTUAL_AVAILABLE:
 
             self.sub_title = "Scanning..."
             self._set_status_message("RUNNING", "green")
+            self._set_phase_message("Scanning files")
             pending: set[asyncio.Future] = set()
             for file_path in files:
                 if not self.executor:
@@ -2945,10 +2966,12 @@ if TEXTUAL_AVAILABLE:
                 for task in pending:
                     task.cancel()
                 self.sub_title = "■ Scan stopped"
+                self._set_phase_message("Scan stopped")
             else:
                 if self.db_config and self.executor:
                     self.sub_title = "Scanning database..."
                     self._set_status_message("RUNNING DB", "yellow")
+                    self._set_phase_message("Scanning database")
                     try:
                         db_findings = await loop.run_in_executor(
                             self.executor,
@@ -2963,6 +2986,7 @@ if TEXTUAL_AVAILABLE:
                     self._refresh_db_table()
                 self.scan_complete = True
                 self.sub_title = "✓ Scan Complete"
+                self._set_phase_message("Scan complete")
                 self.query_one("#sort-help", Static).update(
                     "Sort: severity | Filter: all (s=sort, f=filter, d/enter=details, e=export)"
                 )
@@ -2995,6 +3019,9 @@ if TEXTUAL_AVAILABLE:
 
         def _set_status_message(self, message: str, color: str = "cyan") -> None:
             self.query_one("#scan-state", Static).update(f"Status: [{color}]{message}[/]")
+
+        def _set_phase_message(self, message: str) -> None:
+            self.query_one("#scan-phase", Static).update(f"Phase: {message}")
 
         def action_quit(self) -> None:
             self._stop_scan()
