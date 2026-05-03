@@ -407,6 +407,40 @@ class ScannerTests(unittest.TestCase):
         collector.fetch_remote_wp_config_content.assert_called()
         collector.scan_remote_database_risks.assert_called()
 
+    @patch("wp_scanner.getpass.getpass", return_value="secret")
+    @patch("wp_scanner.RemoteSSHCollector")
+    @patch("wp_scanner.TEXTUAL_AVAILABLE", False)
+    def test_main_remote_file_scan_fetches_snapshot_when_not_db_only(
+        self,
+        mock_collector_cls,
+        _mock_getpass,
+    ):
+        collector = mock_collector_cls.return_value
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "index.php").write_text("<?php echo 'ok';", encoding="utf-8")
+            collector.fetch_snapshot.return_value = root
+            collector.last_transfer_bytes = 1024
+            collector.last_total_bytes = 2048
+            collector.last_elapsed_seconds = 1.0
+            collector.last_rate_mib_per_s = 0.5
+            collector.last_inventory_count = 1
+            collector.fetch_remote_wp_config_content.return_value = ""
+            collector.test_remote_database_connection.return_value = (False, "unused")
+            collector.scan_remote_database_risks.return_value = []
+
+            argv = [
+                "wp-scanner.py",
+                ".",
+                "--no-tui",
+                "--remote-ssh",
+                "root@example.com:/var/www/html",
+            ]
+            with patch("sys.argv", argv):
+                main()
+
+        collector.fetch_snapshot.assert_called()
+
     def test_remote_ssh_collector_builds_secure_base_command(self):
         cfg = RemoteSSHConfig(
             host_target="user@example.com",
