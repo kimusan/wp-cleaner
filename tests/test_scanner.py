@@ -544,6 +544,32 @@ class ScannerTests(unittest.TestCase):
                 main()
             self.assertEqual(_load_db_reviewed_state(target), {"a", "b", "c"})
 
+    def test_main_rejects_import_and_export_db_reviewed_state_together(self):
+        argv = [
+            "wp-scanner.py",
+            ".",
+            "--export-db-reviewed-state",
+            "out.json",
+            "--import-db-reviewed-state",
+            "in.json",
+        ]
+        with patch("sys.argv", argv):
+            with self.assertRaises(SystemExit) as ctx:
+                main()
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_main_rejects_missing_import_db_reviewed_state_file(self):
+        argv = [
+            "wp-scanner.py",
+            ".",
+            "--import-db-reviewed-state",
+            "/tmp/this-file-should-not-exist-12345.json",
+        ]
+        with patch("sys.argv", argv):
+            with self.assertRaises(SystemExit) as ctx:
+                main()
+        self.assertEqual(ctx.exception.code, 2)
+
 
     @patch("wp_scanner.getpass.getpass", return_value="secret")
     @patch("wp_scanner.RemoteSSHCollector")
