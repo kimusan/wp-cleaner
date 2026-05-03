@@ -28,6 +28,7 @@ from wp_scanner import (
     _write_db_query_preview_file,
     _db_finding_fingerprint,
     _load_db_reviewed_state,
+    _merge_db_reviewed_state,
     _save_db_reviewed_state,
     main,
 )
@@ -339,6 +340,17 @@ class ScannerTests(unittest.TestCase):
         f2 = _db_finding_fingerprint(finding)
         self.assertEqual(f1, f2)
 
+    def test_merge_db_reviewed_state_unions_sets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "src.json"
+            dst = Path(tmp) / "dst.json"
+            _save_db_reviewed_state(src, {"a", "b"})
+            _save_db_reviewed_state(dst, {"b", "c"})
+            imported, merged = _merge_db_reviewed_state(src, dst)
+            self.assertEqual(imported, 2)
+            self.assertEqual(merged, 3)
+            self.assertEqual(_load_db_reviewed_state(dst), {"a", "b", "c"})
+
     def test_database_scan_risks_clean_fixture_has_no_findings(self):
         cfg = DatabaseConfig(name="wpdb", user="wpuser")
         connector = DatabaseConnector(cfg)
@@ -494,6 +506,43 @@ class ScannerTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as ctx:
                 main()
         self.assertEqual(ctx.exception.code, 2)
+
+    def test_main_export_db_reviewed_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "state.json"
+            export = root / "export.json"
+            _save_db_reviewed_state(source, {"x1", "x2"})
+            argv = [
+                "wp-scanner.py",
+                ".",
+                "--db-reviewed-state",
+                str(source),
+                "--export-db-reviewed-state",
+                str(export),
+            ]
+            with patch("sys.argv", argv):
+                main()
+            self.assertEqual(_load_db_reviewed_state(export), {"x1", "x2"})
+
+    def test_main_import_db_reviewed_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.json"
+            target = root / "target.json"
+            _save_db_reviewed_state(source, {"a", "b"})
+            _save_db_reviewed_state(target, {"b", "c"})
+            argv = [
+                "wp-scanner.py",
+                ".",
+                "--db-reviewed-state",
+                str(target),
+                "--import-db-reviewed-state",
+                str(source),
+            ]
+            with patch("sys.argv", argv):
+                main()
+            self.assertEqual(_load_db_reviewed_state(target), {"a", "b", "c"})
 
 
     @patch("wp_scanner.getpass.getpass", return_value="secret")

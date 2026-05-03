@@ -1322,6 +1322,14 @@ def _save_db_reviewed_state(path: Path, fingerprints: Set[str]) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def _merge_db_reviewed_state(src_path: Path, dst_path: Path) -> Tuple[int, int]:
+    src = _load_db_reviewed_state(src_path)
+    dst_existing = _load_db_reviewed_state(dst_path)
+    merged = set(dst_existing) | set(src)
+    _save_db_reviewed_state(dst_path, merged)
+    return len(src), len(merged)
+
+
 def _collect_infected_paths(results: List[ScanResult]) -> List[Path]:
     infected = sorted({Path(r.file_path) for r in results if r.findings})
     return infected
@@ -4031,6 +4039,8 @@ def main():
     db_group.add_argument('--db-limit-per-table', type=int, default=2000, help='Max rows to scan per database table')
     db_group.add_argument('--db-query-preview-file', default='', help='Write non-destructive DB query previews to this .sql file')
     db_group.add_argument('--db-reviewed-state', default='wp-scan-db-reviewed.json', help='Path to JSON file storing reviewed DB finding fingerprints (TUI)')
+    db_group.add_argument('--export-db-reviewed-state', default='', help='Export reviewed DB state JSON to this path and exit')
+    db_group.add_argument('--import-db-reviewed-state', default='', help='Import reviewed DB state JSON into --db-reviewed-state and exit')
     args = parser.parse_args()
     if args.db_limit_per_table <= 0:
         parser.error("--db-limit-per-table must be greater than 0")
@@ -4043,6 +4053,26 @@ def main():
         parser.error("--db-only cannot be combined with --quarantine or --delete (file-only actions)")
     if args.remote_ssh and args.restore:
         parser.error("--restore operates on local audit/quarantine files and cannot be combined with --remote-ssh")
+    if args.export_db_reviewed_state and args.import_db_reviewed_state:
+        parser.error("--export-db-reviewed-state and --import-db-reviewed-state are mutually exclusive")
+
+    reviewed_state_path = Path(args.db_reviewed_state)
+    if args.export_db_reviewed_state:
+        source = _load_db_reviewed_state(reviewed_state_path)
+        target = Path(args.export_db_reviewed_state)
+        _save_db_reviewed_state(target, source)
+        print(f"Exported {len(source)} reviewed DB fingerprint(s) to {target}")
+        return
+    if args.import_db_reviewed_state:
+        src_path = Path(args.import_db_reviewed_state)
+        if not src_path.exists():
+            parser.error(f"--import-db-reviewed-state file not found: {src_path}")
+        imported_count, merged_count = _merge_db_reviewed_state(src_path, reviewed_state_path)
+        print(
+            f"Imported reviewed DB state from {src_path}: "
+            f"source={imported_count}, merged_total={merged_count}, target={reviewed_state_path}"
+        )
+        return
 
     sig_manager = SignatureManager(custom_signature_file=args.signatures or None)
     sig_manager.load_builtin()
