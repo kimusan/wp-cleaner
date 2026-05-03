@@ -3095,9 +3095,9 @@ if TEXTUAL_AVAILABLE:
                 csv_path = Path(f"wp-scan-db-findings-{timestamp}.csv")
                 sql_path = Path(f"wp-scan-db-query-preview-{timestamp}.sql")
                 selected_rows = [(k, f) for k, f in self.db_visible_rows if k in self.selected_db_keys]
-                export_findings = [f for _, f in selected_rows] if selected_rows else [f for _, f in self.db_visible_rows]
+                export_rows = selected_rows if selected_rows else list(self.db_visible_rows)
                 rows = []
-                for finding in export_findings:
+                for key, finding in export_rows:
                     rows.append(
                         {
                             "table_name": finding.table_name,
@@ -3111,6 +3111,7 @@ if TEXTUAL_AVAILABLE:
                             "query_preview": finding.query_preview,
                             "description": finding.description,
                             "remediation": finding.remediation,
+                            "reviewed": key in self.reviewed_db_keys,
                             "timestamp": finding.timestamp,
                         }
                     )
@@ -3120,9 +3121,9 @@ if TEXTUAL_AVAILABLE:
                     writer = csv.DictWriter(cf, fieldnames=list(rows[0].keys()))
                     writer.writeheader()
                     writer.writerows(rows)
-                _write_db_query_preview_file(export_findings, sql_path)
+                _write_db_query_preview_file([f for _, f in export_rows], sql_path)
                 self.query_one("#db-status", Static).update(
-                    f"Exported DB findings ({len(export_findings)}): {json_path.name}, {csv_path.name}, {sql_path.name}"
+                    f"Exported DB findings ({len(export_rows)}): {json_path.name}, {csv_path.name}, {sql_path.name}"
                 )
                 return
             if not self.scan_complete:
