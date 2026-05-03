@@ -495,6 +495,105 @@ class ScannerTests(unittest.TestCase):
                 main()
         self.assertEqual(ctx.exception.code, 2)
 
+
+    @patch("wp_scanner.getpass.getpass", return_value="secret")
+    @patch("wp_scanner.RemoteSSHCollector")
+    @patch("wp_scanner.TEXTUAL_AVAILABLE", False)
+    def test_main_remote_db_only_unreadable_wp_config_skips_db_scan(
+        self,
+        mock_collector_cls,
+        _mock_getpass,
+    ):
+        collector = mock_collector_cls.return_value
+        collector.fetch_remote_wp_config_content.side_effect = RuntimeError("read failed")
+
+        argv = [
+            "wp-scanner.py",
+            ".",
+            "--no-tui",
+            "--scan-db",
+            "--db-only",
+            "--remote-ssh",
+            "root@example.com:/var/www/html",
+        ]
+        with patch("sys.argv", argv):
+            main()
+
+        collector.fetch_snapshot.assert_not_called()
+        collector.fetch_remote_wp_config_content.assert_called()
+        collector.scan_remote_database_risks.assert_not_called()
+
+    @patch("wp_scanner.getpass.getpass", return_value="secret")
+    @patch("wp_scanner.RemoteSSHCollector")
+    @patch("wp_scanner.TEXTUAL_AVAILABLE", False)
+    def test_main_remote_db_only_preflight_failure_still_attempts_scan(
+        self,
+        mock_collector_cls,
+        _mock_getpass,
+    ):
+        collector = mock_collector_cls.return_value
+        collector.fetch_remote_wp_config_content.return_value = (
+            "<?php\n"
+            "define('DB_NAME', 'wpdb');\n"
+            "define('DB_USER', 'wpuser');\n"
+            "define('DB_PASSWORD', 'secret');\n"
+            "define('DB_HOST', '127.0.0.1:3306');\n"
+            "$table_prefix = 'wp_';\n"
+        )
+        collector.test_remote_database_connection.return_value = (False, "Access denied")
+        collector.scan_remote_database_risks.return_value = []
+
+        argv = [
+            "wp-scanner.py",
+            ".",
+            "--no-tui",
+            "--scan-db",
+            "--db-only",
+            "--remote-ssh",
+            "root@example.com:/var/www/html",
+        ]
+        with patch("sys.argv", argv):
+            main()
+
+        collector.fetch_snapshot.assert_not_called()
+        collector.test_remote_database_connection.assert_called()
+        collector.scan_remote_database_risks.assert_called_with(unittest.mock.ANY, 2000)
+
+    @patch("wp_scanner.getpass.getpass", return_value="secret")
+    @patch("wp_scanner.RemoteSSHCollector")
+    @patch("wp_scanner.TEXTUAL_AVAILABLE", False)
+    def test_main_remote_db_only_scan_exception_is_handled(
+        self,
+        mock_collector_cls,
+        _mock_getpass,
+    ):
+        collector = mock_collector_cls.return_value
+        collector.fetch_remote_wp_config_content.return_value = (
+            "<?php\n"
+            "define('DB_NAME', 'wpdb');\n"
+            "define('DB_USER', 'wpuser');\n"
+            "define('DB_PASSWORD', 'secret');\n"
+            "define('DB_HOST', '127.0.0.1:3306');\n"
+            "$table_prefix = 'wp_';\n"
+        )
+        collector.test_remote_database_connection.return_value = (False, "Remote host is missing mysql/mariadb client binaries")
+        collector.scan_remote_database_risks.side_effect = RuntimeError("no DB client")
+
+        argv = [
+            "wp-scanner.py",
+            ".",
+            "--no-tui",
+            "--scan-db",
+            "--db-only",
+            "--remote-ssh",
+            "root@example.com:/var/www/html",
+        ]
+        with patch("sys.argv", argv):
+            main()
+
+        collector.fetch_snapshot.assert_not_called()
+        collector.scan_remote_database_risks.assert_called_with(unittest.mock.ANY, 2000)
+
     def test_remote_ssh_collector_builds_secure_base_command(self):
         cfg = RemoteSSHConfig(
             host_target="user@example.com",
