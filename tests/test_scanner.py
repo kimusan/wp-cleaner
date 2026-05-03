@@ -468,6 +468,20 @@ class ScannerTests(unittest.TestCase):
 
         collector.fetch_snapshot.assert_called()
 
+    def test_main_rejects_non_positive_db_limit_per_table(self):
+        argv = [
+            "wp-scanner.py",
+            ".",
+            "--no-tui",
+            "--scan-db",
+            "--db-limit-per-table",
+            "0",
+        ]
+        with patch("sys.argv", argv):
+            with self.assertRaises(SystemExit) as ctx:
+                main()
+        self.assertEqual(ctx.exception.code, 2)
+
     def test_remote_ssh_collector_builds_secure_base_command(self):
         cfg = RemoteSSHConfig(
             host_target="user@example.com",
