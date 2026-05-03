@@ -1330,6 +1330,51 @@ def _merge_db_reviewed_state(src_path: Path, dst_path: Path) -> Tuple[int, int]:
     return len(src), len(merged)
 
 
+def _choose_db_export_rows(
+    db_visible_rows: List[Tuple[str, DatabaseFinding]],
+    selected_db_keys: Set[str],
+) -> List[Tuple[str, DatabaseFinding]]:
+    selected_rows = [(k, f) for k, f in db_visible_rows if k in selected_db_keys]
+    return selected_rows if selected_rows else list(db_visible_rows)
+
+
+def _db_export_row_dict(
+    key: str,
+    finding: DatabaseFinding,
+    reviewed_db_fingerprints: Set[str],
+) -> Dict[str, object]:
+    return {
+        "table_name": finding.table_name,
+        "row_ref": finding.row_ref,
+        "signature_id": finding.signature_id,
+        "signature_name": finding.signature_name,
+        "threat_level": finding.threat_level,
+        "category": finding.category,
+        "matched_content": finding.matched_content,
+        "source_excerpt": finding.source_excerpt,
+        "query_preview": finding.query_preview,
+        "description": finding.description,
+        "remediation": finding.remediation,
+        "reviewed": _db_finding_fingerprint(finding) in reviewed_db_fingerprints,
+        "timestamp": finding.timestamp,
+    }
+
+
+def _toggle_reviewed_fingerprints(
+    reviewed_db_fingerprints: Set[str],
+    db_visible_rows: List[Tuple[str, DatabaseFinding]],
+    selected_keys: Set[str],
+) -> Tuple[Set[str], bool]:
+    target_fingerprints = {
+        _db_finding_fingerprint(finding)
+        for key, finding in db_visible_rows
+        if key in selected_keys
+    }
+    if target_fingerprints and target_fingerprints.issubset(reviewed_db_fingerprints):
+        return reviewed_db_fingerprints - target_fingerprints, False
+    return reviewed_db_fingerprints | target_fingerprints, True
+
+
 def _collect_infected_paths(results: List[ScanResult]) -> List[Path]:
     infected = sorted({Path(r.file_path) for r in results if r.findings})
     return infected
@@ -3139,27 +3184,10 @@ if TEXTUAL_AVAILABLE:
                 json_path = Path(f"wp-scan-db-findings-{timestamp}.json")
                 csv_path = Path(f"wp-scan-db-findings-{timestamp}.csv")
                 sql_path = Path(f"wp-scan-db-query-preview-{timestamp}.sql")
-                selected_rows = [(k, f) for k, f in self.db_visible_rows if k in self.selected_db_keys]
-                export_rows = selected_rows if selected_rows else list(self.db_visible_rows)
+                export_rows = _choose_db_export_rows(self.db_visible_rows, self.selected_db_keys)
                 rows = []
                 for key, finding in export_rows:
-                    rows.append(
-                        {
-                            "table_name": finding.table_name,
-                            "row_ref": finding.row_ref,
-                            "signature_id": finding.signature_id,
-                            "signature_name": finding.signature_name,
-                            "threat_level": finding.threat_level,
-                            "category": finding.category,
-                            "matched_content": finding.matched_content,
-                            "source_excerpt": finding.source_excerpt,
-                            "query_preview": finding.query_preview,
-                            "description": finding.description,
-                            "remediation": finding.remediation,
-                            "reviewed": _db_finding_fingerprint(finding) in self.reviewed_db_fingerprints,
-                            "timestamp": finding.timestamp,
-                        }
-                    )
+                    rows.append(_db_export_row_dict(key, finding, self.reviewed_db_fingerprints))
                 with open(json_path, "w", encoding="utf-8") as jf:
                     json.dump(rows, jf, indent=2)
                 with open(csv_path, "w", encoding="utf-8", newline="") as cf:
@@ -3323,18 +3351,16 @@ if TEXTUAL_AVAILABLE:
                     self.bell()
                     return
                 selected_keys = {self.db_visible_rows[row_index][0]}
-            target_fingerprints = {
-                _db_finding_fingerprint(f)
-                for k, f in self.db_visible_rows
-                if k in selected_keys
-            }
-            if target_fingerprints.issubset(self.reviewed_db_fingerprints):
-                self.reviewed_db_fingerprints -= target_fingerprints
-                _save_db_reviewed_state(self.db_reviewed_state_path, self.reviewed_db_fingerprints)
+            updated_fingerprints, added = _toggle_reviewed_fingerprints(
+                self.reviewed_db_fingerprints,
+                self.db_visible_rows,
+                selected_keys,
+            )
+            self.reviewed_db_fingerprints = updated_fingerprints
+            _save_db_reviewed_state(self.db_reviewed_state_path, self.reviewed_db_fingerprints)
+            if not added:
                 self.query_one("#db-status", Static).update(f"Cleared reviewed state for {len(selected_keys)} DB finding(s)")
             else:
-                self.reviewed_db_fingerprints |= target_fingerprints
-                _save_db_reviewed_state(self.db_reviewed_state_path, self.reviewed_db_fingerprints)
                 self.query_one("#db-status", Static).update(f"Marked {len(selected_keys)} DB finding(s) as reviewed")
             self._refresh_db_table()
 

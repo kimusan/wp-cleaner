@@ -27,9 +27,12 @@ from wp_scanner import (
     ScanStats,
     _write_db_query_preview_file,
     _db_finding_fingerprint,
+    _db_export_row_dict,
     _load_db_reviewed_state,
     _merge_db_reviewed_state,
     _save_db_reviewed_state,
+    _choose_db_export_rows,
+    _toggle_reviewed_fingerprints,
     main,
 )
 
@@ -350,6 +353,72 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(imported, 2)
             self.assertEqual(merged, 3)
             self.assertEqual(_load_db_reviewed_state(dst), {"a", "b", "c"})
+
+    def test_choose_db_export_rows_prefers_selection(self):
+        finding_a = DatabaseFinding(
+            table_name="wp_options",
+            row_ref="siteurl",
+            signature_id="DB003",
+            signature_name="Script Redirect",
+            threat_level="high",
+            category="redirect",
+            matched_content="window.location=",
+            description="desc",
+            remediation="rem",
+        )
+        finding_b = DatabaseFinding(
+            table_name="wp_posts",
+            row_ref="1",
+            signature_id="DB001",
+            signature_name="Eval/Base64 Chain",
+            threat_level="critical",
+            category="backdoor",
+            matched_content="eval(base64_decode(",
+            description="desc",
+            remediation="rem",
+        )
+        rows = [("db_1", finding_a), ("db_2", finding_b)]
+        selected = _choose_db_export_rows(rows, {"db_2"})
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0][0], "db_2")
+        fallback = _choose_db_export_rows(rows, set())
+        self.assertEqual(len(fallback), 2)
+
+    def test_toggle_reviewed_fingerprints_add_and_remove(self):
+        finding = DatabaseFinding(
+            table_name="wp_options",
+            row_ref="siteurl",
+            signature_id="DB003",
+            signature_name="Script Redirect",
+            threat_level="high",
+            category="redirect",
+            matched_content="window.location=",
+            description="desc",
+            remediation="rem",
+        )
+        rows = [("db_1", finding)]
+        updated, added = _toggle_reviewed_fingerprints(set(), rows, {"db_1"})
+        self.assertTrue(added)
+        self.assertEqual(len(updated), 1)
+        updated2, added2 = _toggle_reviewed_fingerprints(updated, rows, {"db_1"})
+        self.assertFalse(added2)
+        self.assertEqual(updated2, set())
+
+    def test_db_export_row_dict_marks_reviewed(self):
+        finding = DatabaseFinding(
+            table_name="wp_options",
+            row_ref="siteurl",
+            signature_id="DB003",
+            signature_name="Script Redirect",
+            threat_level="high",
+            category="redirect",
+            matched_content="window.location=",
+            description="desc",
+            remediation="rem",
+        )
+        fp = _db_finding_fingerprint(finding)
+        row = _db_export_row_dict("db_1", finding, {fp})
+        self.assertTrue(bool(row["reviewed"]))
 
     def test_database_scan_risks_clean_fixture_has_no_findings(self):
         cfg = DatabaseConfig(name="wpdb", user="wpuser")
