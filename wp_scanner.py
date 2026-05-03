@@ -1096,7 +1096,12 @@ class ReportGenerator:
 
         findings_table = "\n".join(rows) if rows else "<tr><td colspan='9'>No threats detected.</td></tr>"
         db_rows = []
-        for finding in (db_findings or []):
+        db_items = db_findings or []
+        db_critical = len([f for f in db_items if f.threat_level == "critical"])
+        db_high = len([f for f in db_items if f.threat_level == "high"])
+        db_medium = len([f for f in db_items if f.threat_level == "medium"])
+        db_low = len([f for f in db_items if f.threat_level == "low"])
+        for finding in db_items:
             severity_class = f"sev-{finding.threat_level}"
             db_rows.append(
                 "<tr>"
@@ -1111,6 +1116,14 @@ class ReportGenerator:
                 "</tr>"
             )
         db_findings_table = "\n".join(db_rows) if db_rows else "<tr><td colspan='8'>No database findings.</td></tr>"
+        db_summary_html = f"""
+  <div class="summary">
+    <h2>Database Findings Summary</h2>
+    <div><strong>Source:</strong> Database</div>
+    <div><strong>Total DB Findings:</strong> {len(db_items)}</div>
+    <div>Critical: {db_critical} | High: {db_high} | Medium: {db_medium} | Low: {db_low}</div>
+  </div>
+"""
         remediation_html = ""
         if remediation_audit:
             summary = remediation_audit.get("summary", {})
@@ -1186,6 +1199,7 @@ class ReportGenerator:
       {findings_table}
     </tbody>
   </table>
+{db_summary_html}
   <h2>Database Findings</h2>
   <table>
     <thead>

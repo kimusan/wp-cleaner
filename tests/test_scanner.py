@@ -282,6 +282,10 @@ class ScannerTests(unittest.TestCase):
         text_report = ReportGenerator.generate_text_report([], stats, db_findings=db_findings)
         self.assertIn("DATABASE FINDINGS", text_report)
         self.assertIn("Query Preview", text_report)
+        html_report = ReportGenerator.generate_html_report([], stats, db_findings=db_findings)
+        self.assertIn("Database Findings Summary", html_report)
+        self.assertIn("Total DB Findings:</strong> 1", html_report)
+        self.assertIn("<strong>Source:</strong> Database", html_report)
 
     def test_write_db_query_preview_file_outputs_sql(self):
         with tempfile.TemporaryDirectory() as tmp:
