@@ -636,6 +636,8 @@ def get_builtin_signatures() -> List[Signature]:
         Signature("WP125", "JS Payment Form Exfiltration", r'addEventListener\s*\(\s*[\'"]submit[\'"]\s*,[\s\S]{0,260}?(fetch|XMLHttpRequest|navigator\.sendBeacon)[\s\S]{0,260}?(card|cc|cvv|expiry|exp_month|exp_year|payment)', "Potential payment form exfiltration hook in JavaScript", ThreatLevel.CRITICAL, "skimmer", "Remove malicious form hook and review all checkout/payment scripts"),
         Signature("WP126", "JS Keylogger Exfiltration", r'addEventListener\s*\(\s*[\'"](?:keyup|keydown|input)[\'"]\s*,[\s\S]{0,260}?(fetch|XMLHttpRequest|navigator\.sendBeacon)', "Potential key/input capture with outbound exfiltration", ThreatLevel.HIGH, "skimmer", "Remove key capture logic and validate trusted analytics scripts only"),
         Signature("WP127", "Stealth Location Redirect", r'(setTimeout|setInterval)\s*\([\s\S]{0,160}?(window\.location|document\.location)\s*=', "Delayed client-side redirect often used for stealth traffic hijacking", ThreatLevel.MEDIUM, "redirect", "Review delayed redirect logic and remove unauthorized traffic forwarding"),
+        Signature("WP128", "Decoded Superglobal Execution Chain", r'(eval|assert)\s*\(\s*(?:gzinflate|base64_decode|str_rot13)\s*\(\s*\$_(GET|POST|REQUEST|COOKIE)\s*\[', "Decoded request data fed into runtime code execution", ThreatLevel.CRITICAL, "backdoor", "Remove decoded superglobal execution chain and inspect payload source and call path"),
+        Signature("WP129", "JS Miner Endpoint Bootstrap", r'(WebSocket|fetch)\s*\(\s*[\'"](?:wss?|https?)://[^\'\"\\s]*(?:stratum|randomx|cryptonight|monero)[^\'\"]*[\'"]', "JavaScript bootstrap to miner endpoint/protocol indicators", ThreatLevel.CRITICAL, "crypto_miner", "Remove miner bootstrap code and verify all external script dependencies"),
     ]
     php_signature_ids = {
         "WP004", "WP007", "WP008", "WP009", "WP010", "WP011", "WP014", "WP015",
@@ -646,13 +648,14 @@ def get_builtin_signatures() -> List[Signature]:
         "WP104", "WP105", "WP106", "WP107", "WP108", "WP111", "WP112", "WP113",
         "WP114", "WP115", "WP116", "WP117", "WP118", "WP119", "WP120", "WP121",
         "WP124",
+        "WP128",
     }
     for sig in signatures:
         if sig.id in php_signature_ids:
             sig.target_type = "php"
         elif sig.id in {"WP122", "WP123"}:
             sig.target_type = "htaccess"
-        elif sig.id in {"WP125", "WP126", "WP127"}:
+        elif sig.id in {"WP125", "WP126", "WP127", "WP129"}:
             sig.target_type = "js"
     return signatures
 

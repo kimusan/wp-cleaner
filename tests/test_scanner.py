@@ -997,6 +997,33 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(result.status, ScanStatus.COMPLETED.value)
             self.assertFalse(any(f.signature_id == "WP026" for f in result.findings))
 
+    def test_scan_file_detects_decoded_superglobal_execution_chain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "payload.php"
+            target.write_text(
+                "<?php\n"
+                "eval(base64_decode($_POST['x']));\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP128" for f in result.findings))
+
+    def test_scan_file_detects_js_miner_endpoint_bootstrap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "miner.js"
+            target.write_text(
+                "const ws = new WebSocket('wss://pool.example.com/stratum');\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP129" for f in result.findings))
+
     def test_collect_files_skips_git_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
