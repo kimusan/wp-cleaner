@@ -968,6 +968,8 @@ class FileScanner:
                     continue
                 signature_match_counts.setdefault(sig.id, 0)
                 for match in pattern.finditer(content):
+                    if self._should_skip_signature_match(sig.id, content, match.start(), match.end()):
+                        continue
                     if signature_match_counts[sig.id] >= self.MAX_MATCHES_PER_SIGNATURE_PER_FILE:
                         break
                     line_num = bisect.bisect_right(line_starts, match.start())
@@ -989,6 +991,16 @@ class FileScanner:
             return ScanResult(file_path=str(filepath), status=ScanStatus.COMPLETED.value, findings=findings, scan_time_ms=scan_time)
         except Exception as e:
             return ScanResult(file_path=str(filepath), status=ScanStatus.ERROR.value, error=str(e))
+
+    @staticmethod
+    def _should_skip_signature_match(signature_id: str, content: str, start: int, end: int) -> bool:
+        # Reduce wallet false positives from identifier-like tokens (e.g. css/js var names).
+        if signature_id in {"WP096", "WP097"}:
+            before = content[start - 1] if start > 0 else ""
+            after = content[end] if end < len(content) else ""
+            if (before.isalnum() or before in {"_", "-"}) or (after.isalnum() or after in {"_", "-"}):
+                return True
+        return False
 
     def collect_files(self, root_path: Path) -> List[Path]:
         files: List[Path] = []

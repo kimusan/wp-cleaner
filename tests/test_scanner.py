@@ -1292,6 +1292,32 @@ class ScannerTests(unittest.TestCase):
                 self.scanner.MAX_MATCHES_PER_SIGNATURE_PER_FILE,
             )
 
+    def test_scan_file_does_not_flag_wallet_inside_identifier_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "styles.css"
+            target.write_text(
+                ".wallet-1BoatSLRHtKNngkdXEeobR76b53LETtpyT-icon { color: #333; }\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertFalse(any(f.signature_id == "WP096" for f in result.findings))
+
+    def test_scan_file_flags_wallet_literal_with_safe_boundaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "wallet.txt"
+            target.write_text(
+                "Donate BTC: 1BoatSLRHtKNngkdXEeobR76b53LETtpyT\n",
+                encoding="utf-8",
+            )
+
+            result = self.scanner.scan_file(target)
+            self.assertEqual(result.status, ScanStatus.COMPLETED.value)
+            self.assertTrue(any(f.signature_id == "WP096" for f in result.findings))
+
     def test_scan_file_does_not_flag_fontawesome_bitcoin_as_miner_pool(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
