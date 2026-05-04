@@ -1045,6 +1045,7 @@ class ReportGenerator:
             },
             "findings": [
                 {
+                    "source_type": "file",
                     "file_path": f.file_path,
                     "line_number": f.line_number,
                     "signature_id": f.signature_id,
@@ -1064,6 +1065,7 @@ class ReportGenerator:
             payload["remediation_audit"] = remediation_audit
         payload["database_findings"] = [
             {
+                "source_type": "database",
                 "table_name": f.table_name,
                 "row_ref": f.row_ref,
                 "signature_id": f.signature_id,

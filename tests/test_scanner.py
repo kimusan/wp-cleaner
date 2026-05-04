@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from wp_scanner import (
     FileScanner,
+    Finding,
     SignatureManager,
     ScanStatus,
     WordPressCoreVerifier,
@@ -24,6 +25,7 @@ from wp_scanner import (
     DatabaseConnector,
     DatabaseFinding,
     ReportGenerator,
+    ScanResult,
     ScanStats,
     _write_db_query_preview_file,
     _db_finding_fingerprint,
@@ -279,6 +281,10 @@ class ScannerTests(unittest.TestCase):
         self.assertIn("database_findings", payload)
         self.assertEqual(len(payload["database_findings"]), 1)
         self.assertIn("query_preview", payload["database_findings"][0])
+        self.assertEqual(payload["database_findings"][0]["source_type"], "database")
+        self.assertIn("findings", payload)
+        if payload["findings"]:
+            self.assertEqual(payload["findings"][0]["source_type"], "file")
         text_report = ReportGenerator.generate_text_report([], stats, db_findings=db_findings)
         self.assertIn("DATABASE FINDINGS", text_report)
         self.assertIn("Query Preview", text_report)
@@ -309,6 +315,28 @@ class ScannerTests(unittest.TestCase):
             self.assertIn("wp-scanner DB remediation query preview", content)
             self.assertIn("DB003", content)
             self.assertIn("SELECT option_name FROM wp_options", content)
+
+    def test_json_report_labels_file_findings_source_type(self):
+        stats = ScanStats()
+        stats.scanned_files = 1
+        stats.total_files = 1
+        finding = Finding(
+            file_path="/tmp/x.php",
+            line_number=12,
+            signature_id="WP021",
+            signature_name="Base64 Decode Eval",
+            threat_level="critical",
+            category="backdoor",
+            matched_content="eval(base64_decode(",
+            context_before="",
+            context_after="",
+            description="desc",
+            remediation="rem",
+        )
+        result = ScanResult(file_path="/tmp/x.php", status=ScanStatus.COMPLETED.value, findings=[finding])
+        payload = ReportGenerator.generate_json_report([result], stats)
+        self.assertEqual(len(payload["findings"]), 1)
+        self.assertEqual(payload["findings"][0]["source_type"], "file")
 
     def test_db_reviewed_state_save_and_load_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
